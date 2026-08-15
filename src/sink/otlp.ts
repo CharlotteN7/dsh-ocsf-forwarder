@@ -195,7 +195,8 @@ export class OtlpShipper {
         this.options.timeoutMs,
       )
       if (!accepted) break
-      offset += Buffer.byteLength(slice.join('\n')) + slice.length
+      // Each spooled line contributes its own bytes plus its newline.
+      offset += slice.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0)
       shipped += records.length
       writeFileSync(this.options.cursorPath, String(offset))
     }

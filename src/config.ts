@@ -252,6 +252,9 @@ function resolveOtlp(config: Config): ResolvedOtlp | undefined {
     // URL parse failure only; the message names the offending value.
     throw new Error(`ocsf-forwarder: otlp.endpoint is not a valid URL: ${endpoint}`)
   }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`ocsf-forwarder: otlp.endpoint must be an http or https URL, got "${endpoint}"`)
+  }
   const target = url.pathname === '/' ? new URL('/v1/logs', url).href : url.href
   return {
     url: target,
