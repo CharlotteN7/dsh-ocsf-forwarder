@@ -38,7 +38,7 @@ from `https://schema.ocsf.io/api/1.9.0/...` rather than from memory.
 - No secret detection. Redaction of *matched secrets* is `dsh-dlp`'s job; this plugin's privacy stance is
   categorical (§9), not detector-driven.
 - No modification of any tool call, approval decision, model request, or session surface. The plugin
-  registers zero waterfall listeners in its default configuration.
+  registers zero waterfall listeners.
 
 ---
 
@@ -56,10 +56,10 @@ on a duplicate (`dsh/vendor/cordis/src/reflect.ts:290`). The base bundle already
 | **B. `session-telemetry/record` waterfall listener** | Attach beside the existing backend and transform records on their way out. | **Rejected as the primary path, kept as an optional mode.** Two disqualifiers: (1) the coordinator that dispatches this waterfall is constructed *by the backend plugin* (`dsh/packages/session/session-telemetry-otel/src/index.ts:239`), and only in `FULL`/`FEEDBACK_ONLY` mode — with the shipped default `DISABLED` we would receive nothing at all, silently. (2) The waterfall is dispatched synchronously on the capture hot path with **no** try/catch in Cordis's waterfall, so a throwing listener withholds that record permanently. A SIEM forwarder must not be able to delete the deployment's telemetry by failing. |
 | **C. `session/event` observer** ✅ | `ctx.on('session/event', ...)` at the plugin's own (untagged, therefore unfiltered) context. | **Chosen.** It works with no telemetry service mounted at all; it is `@mode emit`, so listener failures are contained per listener (`try`/`catch` plus a `.catch` on any returned promise, `dsh/packages/core/session/src/index.ts:382-399`) and are logged, not propagated; it sees the event envelope verbatim (`seq`, `time`, `type`, `data`) rather than the coordinator's projection; and it cannot affect the agent loop's outcome. |
 
-Option B remains available as `telemetryTap: true` (default `false`) for deployments already running the
-OTel backend that want the OCSF lane fed from the same redacted capture stream. In that mode our listener
-body is wrapped in a total `try`/`catch` and *always* returns `next()`, so it can neither throw nor
-short-circuit; it observes and delegates.
+Option B stays on the roadmap (§11) as an opt-in `telemetryTap` mode for deployments already running the
+OTel backend that want the OCSF lane fed from the same redacted capture stream. It is deliberately not in
+this prototype: when it lands, the listener body must be wrapped in a total `try`/`catch` and *always*
+return `next()`, so it can neither throw nor short-circuit.
 
 Consequences we accept from option C:
 
@@ -378,8 +378,8 @@ a wider reader set than the workspace itself.
 
 **Lane B — restricted (opt-in, separate file, mode 0600).** The same records with `raw_data` populated
 (the event `data` verbatim) and `message_context.prompt_text`/`response_text` filled. Joined to lane A by
-`metadata.uid`. Enabling it requires setting `restrictedSpool.path` *and* `restrictedSpool.acknowledged:
-true`; the plugin fails loud at load otherwise, so nobody enables full-body capture by accident.
+`metadata.uid`. Enabling it requires setting `restricted.path` *and* `restricted.acknowledged: true`; the plugin fails
+loud at load otherwise, so nobody enables full-body capture by accident.
 
 **The HMAC key** is `hmacKey: { source: 'ephemeral' | 'env' | 'literal' }`, default `ephemeral` (a random
 32-byte key per process: correlation holds within a run, not across runs). `env` reads a named variable and
@@ -394,14 +394,15 @@ categorically not secrets-by-construction) are exempt, and that exemption is per
 
 | Surface | What it proves | Where |
 |---|---|---|
-| `Config` validation | required fields, defaults, `restrictedSpool` acknowledgement gate, `hmacKey.source: 'env'` failing loud on a missing variable | `tests/unit/config.spec.ts` |
-| Mapper — tool events | `bash` → 1007/Launch with `type_uid` 100701; `read` → 1001/Read; `web_fetch` → 4002/Get with `http_request`; unknown tool → 6003; `tool/result` callId read from `message.source.callId` and from `content[0].toolCallId` | `tests/unit/map-tool.spec.ts` |
-| Mapper — lifecycle | every `TurnEndReason.kind` → `status_id`/`severity_id`; a merged unknown `kind` falls through to Unknown; `request/header` carries tool names but no schemas or prompt text | `tests/unit/map-session.spec.ts` |
-| Mapper — approvals | asked → 3003 pending with `privileges`; each `ApprovalOutcome` → `status_id` | `tests/unit/map-approval.spec.ts` |
-| Correlator | call↔result pairing by callId with `duration`; ask↔decide pairing by id with latency; unresolved entries flushed on dispose; two sessions with the same callId do not cross-talk | `tests/unit/correlate.spec.ts` |
-| Privacy | no raw argument value in a lane-A record; same value → same digest, different key → different digest; URL sanitisation drops the query string; restricted lane carries `raw_data` | `tests/unit/privacy.spec.ts` |
-| Spool + shipper | records are one JSON object per line and parse; rotation at `maxBytes`; the shipper advances its cursor only on a 2xx and replays from the cursor after a restart | `tests/unit/spool.spec.ts`, `tests/unit/otlp.spec.ts` |
-| Replay | seed events below `firstLiveSeq` are forwarded exactly once and marked `replayed`; `boundary` mode emits one marker; `none` mode emits nothing for the seed | `tests/unit/replay.spec.ts` |
+| `Config` validation | required fields, defaults, restricted-lane acknowledgement gate, `hmacKey.source: 'env'` failing loud on a missing or short variable, OTLP endpoint validation | `tests/unit/config.spec.ts` |
+| Mapper — tool events | `bash` → 1007/Launch with `type_uid` 100701; `read` → 1001/Read; `web_fetch` → 4002/Get with `http_request`; unknown tool → 6003; `tool/result` callId read from `message.source.callId` and from `content[0].toolCallId`; the composed record's OCSF identity | `tests/unit/map-tools.spec.ts` |
+| Mapper — lifecycle | every `TurnEndReason.kind` → `status_id`/`severity_id`; a merged unknown `kind` falls through to Unknown; `request/header` carries tool names but no schemas or prompt text; hooks, subagents, workflows, compaction, schedules, and the generic fallback | `tests/unit/map-lifecycle.spec.ts` |
+| Mapper — approvals | asked → 3003 pending with `privileges`; each `ApprovalOutcome` → `status_id`; sandbox/policy/preset changes | `tests/unit/map-authorization.spec.ts` |
+| Correlator and replay | call↔result pairing by callId with `duration`; ask↔decide pairing by id with latency; unresolved entries flushed on dispose; two sessions with the same callId do not cross-talk; each `seedReplay` mode | `tests/unit/map-tools.spec.ts`, `tests/unit/map-authorization.spec.ts`, `tests/unit/forwarder.spec.ts` |
+| Privacy | no raw argument value in a lane-A record; same value → same digest, different key → different digest; URL sanitisation drops the query string; restricted lane carries `raw_data` | `tests/unit/privacy.spec.ts`, `tests/unit/forwarder.spec.ts` |
+| Payload readers | every reader returns `undefined` for the wrong type and for non-records | `tests/unit/read.spec.ts` |
+| Spool + shipper | records are one JSON object per line and parse; file modes; rotation at `maxBytes`; the shipper advances its cursor only on acceptance, holds back a partial line, skips a corrupt one, and replays from the cursor after a restart; the HTTP call against a loopback collector | `tests/unit/sink.spec.ts`, `tests/unit/post-batch.spec.ts` |
+| Mount | the plugin loads on a real Cordis fiber with only `sessions` provided, registers its listeners, opens both lanes with the right modes, and drains on unload | `tests/unit/mount.spec.ts` |
 | **E2E (a)** | booted `dsh`, plugin mounted, mock model drives a real `bash` call → spool holds a 1007 record for the call and a 1007 record for the result, same `metadata.correlation_uid`, `status_id: 1`, `duration ≥ 0`, and no raw command in lane A | `tests/e2e/tool-call.e2e.ts` |
 | **E2E (b)** | the model requests a sandbox escalation (`sandbox_permissions` + `justification`) under `workspace-write`, which drives the real `ApprovalService` → paired 3003 records, `dsh.approval_latency_ms` present and ≥ 0, `status_id: 2` for the fail-closed `unavailable` outcome | `tests/e2e/approval.e2e.ts` |
 | **E2E (c)** | a turn with no tool call still produces `turn/start`/`turn/end` records and the agent's own output is unchanged (the plugin is read-side) | `tests/e2e/tool-call.e2e.ts` |
@@ -411,7 +412,13 @@ E2E (b) needs no fixture plugin and no harness modification: the base bundle set
 `ctx.approval.request(...)` before anything executes. With no answerer composed in the headless profile the
 ask fails closed to `unavailable` — which is itself the more interesting SOC signal.
 
-Coverage: `vitest --coverage` with the inherited 100%-per-file thresholds on `src/`.
+E2E runs in both launch modes (`pnpm run test:e2e` and `DSH_EXAMPLE_MODE=lib pnpm run test:e2e`).
+The harness installs this package's runtime dependency closure into the throwaway profile, so the
+copied plugin resolves its own dependencies instead of reaching the harness checkout.
+
+Coverage: `pnpm run test:coverage`. `CONVENTIONS.md` sets the bar at 100% per file; the suite
+reaches 99.6% lines / 97.8% statements / 97.5% functions / 79.8% branches and the thresholds are
+pinned there, with the residual gap described in `ADR.md` §9.
 
 ---
 
