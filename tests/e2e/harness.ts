@@ -11,9 +11,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   startMockLlmServer,
@@ -25,10 +26,13 @@ import {
 /** Package root of the plugin under test. */
 const PLUGIN_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 
-/** Package name the profile mounts; must match this package's `package.json` name. */
-const PLUGIN_PACKAGE = (JSON.parse(
+/** This package's own manifest, read once for its name and runtime dependencies. */
+const PLUGIN_MANIFEST = JSON.parse(
   readFileSync(join(PLUGIN_ROOT, 'package.json'), 'utf8'),
-) as { name: string }).name
+) as { name: string; dependencies?: Record<string, string> }
+
+/** Package name the profile mounts; must match this package's `package.json` name. */
+const PLUGIN_PACKAGE = PLUGIN_MANIFEST.name
 
 /**
  * Harness checkout used to launch the agent. Point `DSH_REPO` at a checkout
@@ -68,6 +72,12 @@ export interface AgentRunOptions {
   readonly successText?: string
   /** Extra rows appended to the profile's own patch layer. */
   readonly extraProfilePatch?: string
+  /**
+   * `DSH_PERMISSION_MODE` for the run. The default keeps tools unattended;
+   * `workspace-write` leaves the base bundle's approval policy at `ask`, which
+   * is what an approval-path test needs.
+   */
+  readonly permissionMode?: string
   /** Milliseconds before the agent process is killed. */
   readonly timeoutMs?: number
 }
@@ -77,12 +87,20 @@ export interface AgentRunResult {
   readonly code: number
   readonly stdout: string
   readonly stderr: string
-  /** Records the plugin's `tools/pre-execute` listener appended, in order. */
-  readonly observations: readonly Record<string, unknown>[]
+  /** OCSF records the forwarder spooled, in order. */
+  readonly ocsfRecords: readonly OcsfLine[]
   /** The persisted session log, one parsed JSONL row per element. */
   readonly sessionLog: readonly Record<string, unknown>[]
   /** Wire requests the agent made, as captured by the mock. */
   readonly modelRequests: readonly MockLlmRequestRecord[]
+}
+
+/** One spooled OCSF record, read back as plain JSON. */
+export interface OcsfLine extends Record<string, unknown> {
+  readonly class_uid: number
+  readonly activity_id: number
+  readonly metadata: Record<string, unknown> & { readonly uid?: string; readonly correlation_uid?: string }
+  readonly dsh: Record<string, unknown>
 }
 
 /** Recursively collect every file under `dir`; missing directories yield nothing. */
@@ -113,6 +131,76 @@ function readJsonl(file: string): Record<string, unknown>[] {
 }
 
 /**
+ * Directory of one installed package, resolved the way Node's own lookup
+ * would. The real path is searched as well as the given one: under pnpm a
+ * package directory is a symlink into the store, and a dependency of that
+ * package lives beside its real location, not beside the link.
+ * @param name - the package to locate.
+ * @param fromDir - the directory whose resolution paths are searched.
+ * @returns the located package directory.
+ */
+function packageDir(name: string, fromDir: string): string {
+  const bases = new Set([fromDir, realpathSync(fromDir)])
+  for (const base of bases) {
+    const require = createRequire(join(base, 'package.json'))
+    for (const searchPath of require.resolve.paths(name) ?? []) {
+      const candidate = join(searchPath, name)
+      try {
+        statSync(join(candidate, 'package.json'))
+        return candidate
+      } catch {
+        // ENOENT only: keep walking the resolution paths.
+        continue
+      }
+    }
+  }
+  throw new Error(`e2e harness: cannot resolve ${name} from ${fromDir}`)
+}
+
+/**
+ * Copy this plugin's runtime dependency closure into a flat `node_modules`
+ * beside the installed plugin.
+ *
+ * The plugin is copied, not symlinked, into the profile tree, so its own pnpm
+ * store is out of Node's reach from there. Without this the run only works
+ * because the launcher's resolution happens to reach the harness checkout's
+ * own copy of `@deepseek-ai/schemastery`, which is not what an installed
+ * profile looks like. Peer dependencies are deliberately absent: every harness
+ * type this package uses is imported with `import type`, so nothing from
+ * `@deepseek-ai/cordis` or the `dsh-*` packages is emitted as a runtime
+ * import, and Cordis must come from the running installation rather than a
+ * copy.
+ * @param installDir - the plugin's directory inside the profile's node_modules.
+ */
+function copyRuntimeDependencies(installDir: string): void {
+  const copied = new Set<string>()
+  const queue: { name: string; fromDir: string }[] = Object.keys(PLUGIN_MANIFEST.dependencies ?? {})
+    .map(name => ({ name, fromDir: PLUGIN_ROOT }))
+  while (queue.length > 0) {
+    const next = queue.pop()
+    if (next === undefined) continue
+    if (copied.has(next.name)) continue
+    copied.add(next.name)
+    const source = packageDir(next.name, next.fromDir)
+    const target = join(installDir, 'node_modules', next.name)
+    mkdirSync(dirname(target), { recursive: true })
+    cpSync(source, target, { recursive: true, dereference: true })
+    const manifest = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    for (const name of Object.keys(manifest.dependencies ?? {})) {
+      queue.push({ name, fromDir: source })
+    }
+  }
+  // Prove the installed copy is self-sufficient rather than leaning on the
+  // launcher reaching the harness checkout: every package in the closure must
+  // now resolve from inside the profile tree.
+  for (const name of copied) {
+    statSync(join(installDir, 'node_modules', name, 'package.json'))
+  }
+}
+
+/**
  * Materialize a throwaway `$DSH_HOME` holding one profile that mounts this
  * plugin, then boot the agent against a freshly scripted mock model.
  *
@@ -131,7 +219,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   const sessionsRoot = join(home, 'sessions')
   // The bundle patch defaults this to dshHomePath(...), so the throwaway home
   // isolates it without the test overriding the row.
-  const observationLog = join(home, 'dsh-plugin-template.observations.jsonl')
+  const spoolPath = join(home, 'ocsf', 'session.ocsf.jsonl')
   let server: MockLlmServer | undefined
 
   try {
@@ -145,6 +233,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         // ENOENT only: `lib` is absent until `pnpm run build` has run.
       }
     }
+    copyRuntimeDependencies(installDir)
 
     writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
       name: 'dsh-profile-e2e',
@@ -183,7 +272,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         ...process.env,
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
-        DSH_PERMISSION_MODE: 'danger-full-access',
+        DSH_PERMISSION_MODE: options.permissionMode ?? 'danger-full-access',
         DEEPSEEK_API_KEY: 'mock-key',
         DEEPSEEK_BASE_URL: server.baseURL,
       },
@@ -213,7 +302,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       code,
       stdout,
       stderr,
-      observations: readJsonl(observationLog),
+      ocsfRecords: readJsonl(spoolPath) as OcsfLine[],
       sessionLog: logFile === undefined ? [] : readJsonl(logFile),
       modelRequests: [...server.requests],
     }
@@ -222,5 +311,3 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     rmSync(home, { recursive: true, force: true })
   }
 }
-
-

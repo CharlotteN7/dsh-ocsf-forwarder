@@ -60,6 +60,7 @@ const PLUGIN_VERSION = (JSON.parse(
  * @param config - validated `cordis.yml` configuration.
  */
 export function apply(ctx: Context, config: Config): void {
+  console.error(`PROBE loaded from ${import.meta.url}`)
   const resolved = resolveConfig(config)
   const env = createEnvironment(resolved, PLUGIN_VERSION)
   const report = (error: unknown): void => {
