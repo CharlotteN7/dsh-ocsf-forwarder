@@ -1,0 +1,13 @@
+# Bundle layer applied when a profile lists this package in dsh.profile.bundles.
+# The row references the package by NAME so Node resolution finds the installed
+# code from the profile directory.
+#
+# `dshHomePath` is provided on the root context by the app boot, so a layer's
+# `!!js` config expressions can reach it. A profile's own cordis.patch.yml
+# overrides this row by id; note that a patch REPLACES a row's whole `config`,
+# so an override must restate every key it wants to keep.
+- insert:
+    - id: dsh-ocsf-forwarder
+      name: 'dsh-ocsf-forwarder'
+      config:
+        spoolPath: !!js dshHomePath('ocsf/session.ocsf.jsonl')
