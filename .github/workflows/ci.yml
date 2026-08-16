@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned to the rc this plugin is developed against. The npm `latest` dist-tag
+  # for @deepseek-ai/dsh-* still points at 0.0.1-rc.1, so a floating range would
+  # silently resolve to ancient code.
+  DSH_VERSION: 0.1.0-rc.6
+
+jobs:
+  build:
+    name: build and unit tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.19.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      # Coverage thresholds are pinned at the achieved level so a regression fails
+      # even while the gap to 100% is being closed.
+      - name: Unit tests with coverage
+        run: pnpm run test:coverage
+
+  e2e:
+    name: end-to-end against a real harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      # The published CLI, not a monorepo checkout: it needs no source build and
+      # resolves its own bundles. `autoInstallPeers` is required because
+      # @deepseek-ai/dsh-app-boot declares the vendored cordis plugins as
+      # non-optional peers; without it boot dies on a missing
+      # @deepseek-ai/cordis-plugin-group. `nodeLinker: hoisted` is what dsh's own
+      # profiles use, and the build approvals cover its native dependencies.
+      - name: Install the published dsh CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-cli"
+          cd "$RUNNER_TEMP/dsh-cli"
+          cat > package.json <<'JSON'
+          { "name": "dsh-cli-host", "private": true, "type": "module" }
+          JSON
+          cat > pnpm-workspace.yaml <<'YAML'
+          packages:
+            - .
+          nodeLinker: hoisted
+          autoInstallPeers: true
+          allowBuilds:
+            '@deepseek-ai/dsh-subprocess-local': true
+            node-pty: true
+            koffi: true
+            protobufjs: true
+            '@google/genai': true
+          YAML
+          pnpm add -D "@deepseek-ai/dsh@${DSH_VERSION}"
+          test -f node_modules/@deepseek-ai/dsh/lib/bin.js
+
+      # Keyless. The mock speaks the OpenAI wire protocol, so the provider
+      # adapter, agent loop, tool pipeline, guards and persistence are all real.
+      - name: End-to-end tests
+        env:
+          DSH_CLI: ${{ runner.temp }}/dsh-cli/node_modules/@deepseek-ai/dsh/lib/bin.js
+        run: pnpm run test:e2e
+
+  package:
+    name: package integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+
+      - name: publint
+        run: pnpm dlx publint --strict
+
+      # A sibling package once published 1 of its 9 modules because `files` listed the
+      # entry point literally. Assert every built module is actually shipped here too.
+      - name: Every built module is published
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination /tmp > /dev/null
+          tarball="$(ls /tmp/dsh-ocsf-forwarder-*.tgz)"
+          built="$(find lib -name '*.js' | wc -l)"
+          shipped="$(tar tzf "$tarball" | grep -cE '^package/lib/.*\.js$')"
+          echo "built=$built shipped=$shipped"
+          if [ "$built" -ne "$shipped" ]; then
+            echo "::error::$built modules built but $shipped published - check the files field"
+            tar tzf "$tarball" | grep '^package/lib/' || true
+            exit 1
+          fi

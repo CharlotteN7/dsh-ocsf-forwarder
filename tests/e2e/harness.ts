@@ -51,8 +51,22 @@ const DSH_REPO = process.env.DSH_REPO ?? '/path/to/workspace/dsh'
  */
 const LAUNCH_MODE = process.env.DSH_EXAMPLE_MODE === 'lib' ? 'lib' : 'src'
 
+/**
+ * Absolute path to an installed `dsh` bin, used instead of a harness checkout.
+ * Set this to `node_modules/@deepseek-ai/dsh/lib/bin.js` to run against the
+ * published CLI, which is what CI does: the published package needs no
+ * monorepo, no `build:lib:host`, and resolves its own bundles. Requires
+ * `autoInstallPeers: true`, because `@deepseek-ai/dsh-app-boot` declares the
+ * vendored cordis plugins as required peers.
+ */
+const DSH_CLI = process.env.DSH_CLI
+
+/** Directory the CLI subprocess starts in; the agent records it as the session cwd. */
+const DSH_CWD = DSH_CLI === undefined ? DSH_REPO : dirname(DSH_CLI)
+
 /** Command and leading arguments that boot the CLI in the selected mode. */
 function launchArgv(): readonly string[] {
+  if (DSH_CLI !== undefined) return [DSH_CLI]
   return LAUNCH_MODE === 'lib'
     ? [join(DSH_REPO, 'apps/cli/lib/bin.js')]
     : ['--import', import.meta.resolve('tsx'), join(DSH_REPO, 'apps/cli/src/bin.ts')]
@@ -267,7 +281,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       '--profile', 'e2e',
       options.task,
     ], {
-      cwd: DSH_REPO,
+      cwd: DSH_CWD,
       env: {
         ...process.env,
         DSH_HOME: home,
