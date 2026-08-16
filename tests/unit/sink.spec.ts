@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { resolveConfig } from '../../src/config.ts'
-import { OtlpShipper, otlpPayload, type BatchOutcome, type PostBatch } from '../../src/sink/otlp.ts'
-import { FanOutSink, SpoolSink, rotatedGenerations, type Sink } from '../../src/sink/spool.ts'
+import { otlpPayload } from '../../src/sink/otlp.ts'
+import { Shipper } from '../../src/sink/shipper.ts'
+import { FanOutSink, SpoolSink, rotatedGenerations, spoolTotalBytes, type Sink } from '../../src/sink/spool.ts'
+import type { BatchOutcome, PostBatch } from '../../src/sink/transport.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 
 let home: string
@@ -29,7 +31,9 @@ function record(uid: string): OcsfRecord {
 
 /** A spool with generous limits unless a test narrows them. */
 function spool(path: string, overrides: Partial<ConstructorParameters<typeof SpoolSink>[0]> = {}): SpoolSink {
-  return new SpoolSink({ path, maxBytes: 1_000_000, maxGenerations: 8, mode: 0o640, ...overrides })
+  return new SpoolSink({
+    path, maxBytes: 1_000_000, maxGenerations: 8, maxTotalBytes: 1_000_000_000, mode: 0o640, ...overrides,
+  })
 }
 
 /** Every record uid on disk, across the live spool and every rotated generation. */
@@ -110,6 +114,44 @@ describe('rotation', () => {
     expect([...generations].sort()).toEqual([...generations])
     const first = readFileSync(generations[0] as string, 'utf8')
     expect(first).toContain('"S:0"')
+  })
+
+  it('stops rotating once the spool occupies its byte bound, not only its file count', () => {
+    const path = join(home, 'ocsf.jsonl')
+    const warnings: string[] = []
+    // Generous generation count, so only the disk bound can stop rotation.
+    const sink = spool(path, {
+      maxBytes: 200, maxGenerations: 64, maxTotalBytes: 1_500, onWarn: message => warnings.push(message),
+    })
+    for (let index = 0; index < 30; index += 1) sink.write(record(`S:${String(index)}`))
+    sink.close()
+
+    expect(uidsOnDisk(path)).toHaveLength(30)
+    expect(rotatedGenerations(path).length).toBeLessThan(30)
+    expect(statSync(path).size).toBeGreaterThan(200)
+    expect(spoolTotalBytes(path)).toBeGreaterThan(1_500)
+    expect(warnings[0]).toContain('spoolMaxTotalBytes')
+  })
+
+  it('reports the disk it occupies and whether rotation has stopped', () => {
+    const path = join(home, 'ocsf.jsonl')
+    const sink = spool(path, { maxBytes: 200, maxGenerations: 64, maxTotalBytes: 1_500 })
+    expect(sink.pressure()).toEqual({ totalBytes: 0, rotationStopped: false })
+    for (let index = 0; index < 30; index += 1) sink.write(record(`S:${String(index)}`))
+    const pressure = sink.pressure()
+    sink.close()
+    expect(pressure.totalBytes).toBe(spoolTotalBytes(path))
+    expect(pressure.rotationStopped).toBe(true)
+  })
+
+  it('counts the live file and every generation towards the total', () => {
+    const path = join(home, 'ocsf.jsonl')
+    const sink = spool(path, { maxBytes: 200 })
+    for (let index = 0; index < 12; index += 1) sink.write(record(`S:${String(index)}`))
+    sink.close()
+    const perFile = [path, ...rotatedGenerations(path)].map(file => statSync(file).size)
+    expect(spoolTotalBytes(path)).toBe(perFile.reduce((sum, size) => sum + size, 0))
+    expect(rotatedGenerations(path).length).toBeGreaterThan(0)
   })
 
   it('stops rotating and reports it rather than deleting an un-drained generation', () => {
@@ -198,7 +240,7 @@ describe('the shipper', () => {
   }
 
   function shipper(post: PostBatch, overrides: Record<string, unknown> = {}): {
-    instance: OtlpShipper
+    instance: Shipper
     path: string
     cursor: string
     quarantine: string
@@ -206,19 +248,20 @@ describe('the shipper', () => {
     const path = join(home, 'ocsf.jsonl')
     const resolved = resolveConfig({
       spoolPath: path,
+      fleet: { installUid: 'install-test' },
       otlp: { endpoint: 'http://collector:4318', batchSize: 10, ...overrides },
     })
     return {
-      instance: new OtlpShipper(resolved.otlp!, path, 'test', post),
+      instance: new Shipper(resolved.shipper!, path, post),
       path,
-      cursor: resolved.otlp!.cursorPath,
-      quarantine: resolved.otlp!.quarantinePath,
+      cursor: resolved.shipper!.cursorPath,
+      quarantine: resolved.shipper!.quarantinePath,
     }
   }
 
   it('ships spooled records and advances the cursor to the file size', async () => {
     const posted: string[] = []
-    const { instance, path, cursor } = shipper(async (_url, _headers, body) => { posted.push(body); return 'accepted' })
+    const { instance, path, cursor } = shipper(async (_transport, body) => { posted.push(body); return 'accepted' })
     writeFileSync(path, `${JSON.stringify(record('a'))}\n${JSON.stringify(record('b'))}\n`)
 
     expect(await instance.drain()).toBe(2)
@@ -229,7 +272,7 @@ describe('the shipper', () => {
 
   it('drains rotated generations oldest-first and removes each one it has delivered', async () => {
     const seen: string[] = []
-    const { instance, path } = shipper(async (_url, _headers, body) => { seen.push(...delivered(body)); return 'accepted' })
+    const { instance, path } = shipper(async (_transport, body) => { seen.push(...delivered(body)); return 'accepted' })
     const sink = spool(path, { maxBytes: 200 })
     for (let index = 0; index < 30; index += 1) sink.write(record(`S:${String(index)}`))
     sink.close()
@@ -242,7 +285,7 @@ describe('the shipper', () => {
 
   it('does not re-ship what it had already delivered out of a file that then rotated', async () => {
     const seen: string[] = []
-    const { instance, path } = shipper(async (_url, _headers, body) => { seen.push(...delivered(body)); return 'accepted' })
+    const { instance, path } = shipper(async (_transport, body) => { seen.push(...delivered(body)); return 'accepted' })
     // Wide enough that the first two records are still in the live file when
     // the shipper reaches them, so rotation moves bytes the cursor covers.
     const sink = spool(path, { maxBytes: Buffer.byteLength(JSON.stringify(record('S:0'))) * 3 })
@@ -281,7 +324,7 @@ describe('the shipper', () => {
   it('quarantines a batch the collector refuses instead of blocking every record behind it', async () => {
     let attempts = 0
     const seen: string[] = []
-    const { instance, path, quarantine } = shipper(async (_url, _headers, body) => {
+    const { instance, path, quarantine } = shipper(async (_transport, body) => {
       attempts += 1
       const uids = delivered(body)
       if (uids.includes('poison')) return 'reject'
@@ -324,7 +367,7 @@ describe('the shipper', () => {
   it('drains a backlog larger than one read window across successive passes', async () => {
     const seen: string[] = []
     const { instance, path } = shipper(
-      async (_url, _headers, body) => { seen.push(...delivered(body)); return 'accepted' },
+      async (_transport, body) => { seen.push(...delivered(body)); return 'accepted' },
       { maxReadBytes: 400, batchSize: 1 },
     )
     writeFileSync(path, Array.from({ length: 12 }, (_, index) => `${JSON.stringify(record(`S:${String(index)}`))}\n`).join(''))
@@ -336,16 +379,19 @@ describe('the shipper', () => {
 
   it('resumes from the persisted cursor after a restart', async () => {
     const posted: unknown[] = []
-    const { instance, path, cursor } = shipper(async (_url, _headers, body) => { posted.push(body); return 'accepted' })
+    const { instance, path, cursor } = shipper(async (_transport, body) => { posted.push(body); return 'accepted' })
     const first = `${JSON.stringify(record('a'))}\n`
     writeFileSync(path, first)
     await instance.drain()
     writeFileSync(path, `${first}${JSON.stringify(record('b'))}\n`)
 
-    const restarted = new OtlpShipper(
-      resolveConfig({ spoolPath: path, otlp: { endpoint: 'http://collector:4318' } }).otlp!,
+    const restarted = new Shipper(
+      resolveConfig({
+        spoolPath: path,
+        fleet: { installUid: 'install-test' },
+        otlp: { endpoint: 'http://collector:4318' },
+      }).shipper!,
       path,
-      'test',
       async () => 'accepted',
     )
     expect(restarted.cursor()).toBe(Buffer.byteLength(first))
@@ -381,8 +427,12 @@ describe('the shipper', () => {
   it('skips a corrupt line instead of stalling delivery', async () => {
     const errors: unknown[] = []
     const path = join(home, 'ocsf.jsonl')
-    const resolved = resolveConfig({ spoolPath: path, otlp: { endpoint: 'http://collector:4318' } })
-    const instance = new OtlpShipper(resolved.otlp!, path, 'test', async () => 'accepted', error => errors.push(error))
+    const resolved = resolveConfig({
+      spoolPath: path,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318' },
+    })
+    const instance = new Shipper(resolved.shipper!, path, async () => 'accepted', error => errors.push(error))
     writeFileSync(path, `{"broken\n${JSON.stringify(record('b'))}\n`)
     expect(await instance.drain()).toBe(1)
     expect(errors).toHaveLength(1)
@@ -398,8 +448,12 @@ describe('the shipper', () => {
   it('reports a drain failure instead of throwing at the timer', async () => {
     const errors: unknown[] = []
     const missing = join(home, 'missing.jsonl')
-    const resolved = resolveConfig({ spoolPath: missing, otlp: { endpoint: 'http://collector:4318' } })
-    const instance = new OtlpShipper(resolved.otlp!, missing, 'test', async () => 'accepted', error => errors.push(error))
+    const resolved = resolveConfig({
+      spoolPath: missing,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318' },
+    })
+    const instance = new Shipper(resolved.shipper!, missing, async () => 'accepted', error => errors.push(error))
     expect(await instance.drain()).toBe(0)
     expect(errors).toHaveLength(1)
   })
@@ -410,5 +464,45 @@ describe('the shipper', () => {
     instance.start()
     instance.stop()
     instance.stop()
+  })
+
+  it('asks the transport for the body, so the drain owns no wire format', async () => {
+    const bodies: string[] = []
+    const path = join(home, 'ocsf.jsonl')
+    const resolved = resolveConfig({
+      spoolPath: path,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318' },
+    })
+    const shipperOptions = {
+      ...resolved.shipper!,
+      transport: {
+        ...resolved.shipper!.transport,
+        encode: (records: readonly OcsfRecord[]) => `count=${String(records.length)}`,
+      },
+    }
+    const instance = new Shipper(shipperOptions, path, async (_transport, body) => {
+      bodies.push(body)
+      return 'accepted'
+    })
+    writeFileSync(path, `${JSON.stringify(record('a'))}\n${JSON.stringify(record('b'))}\n`)
+
+    expect(await instance.drain()).toBe(2)
+    expect(bodies).toEqual(['count=2'])
+  })
+
+  it('names the destination that refused a batch in the quarantine report', async () => {
+    const errors: unknown[] = []
+    const path = join(home, 'ocsf.jsonl')
+    const resolved = resolveConfig({
+      spoolPath: path,
+      fleet: { installUid: 'install-test' },
+      splunk: { endpoint: 'https://splunk.test:8088', token: { source: 'literal', value: 't' } },
+    })
+    const instance = new Shipper(resolved.shipper!, path, async () => 'reject', error => errors.push(error))
+    writeFileSync(path, `${JSON.stringify(record('a'))}\n`)
+
+    await instance.drain()
+    expect(String((errors[0] as Error).message)).toContain('splunk-hec destination refused 1 record(s)')
   })
 })

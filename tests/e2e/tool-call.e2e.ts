@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { dshOf, runAgent, type OcsfLine } from './harness.ts'
+import { dshOf, isHeartbeat, runAgent, type OcsfLine } from './harness.ts'
 
 /** Records of one event type, in spool order. */
 function ofType(records: readonly OcsfLine[], type: string): OcsfLine[] {
@@ -113,7 +113,9 @@ describe('a real agent run, normalised to OCSF', () => {
       expect(record.metadata.extension).toBeUndefined()
       expect(record.metadata.extensions).toBeUndefined()
       expect(record['dsh']).toBeUndefined()
-      expect(dshOf(record)['session_id']).toBeDefined()
+      // A heartbeat reports on the forwarder, not on a session, so it is the
+      // one record with no session id to carry.
+      if (!isHeartbeat(record)) expect(dshOf(record)['session_id']).toBeDefined()
     }
   }, 120_000)
 })

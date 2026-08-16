@@ -15,7 +15,17 @@ import { SEVERITY, STATUS } from '../ocsf/constants.ts'
 import type { EventMapping } from '../ocsf/record.ts'
 import type { JsonValue } from '../ocsf/types.ts'
 import { readNested, readNumber, readRecord, readString } from '../read.ts'
-import { classifyTool, ocsfClassOf, parseArguments, toolDetails, type ParsedArguments, type ToolClass } from './tools.ts'
+import {
+  DELEGATION_COVERAGE,
+  apiOf,
+  classifyTool,
+  ocsfClassOf,
+  parseArguments,
+  parseMcpToolName,
+  toolDetails,
+  type ParsedArguments,
+  type ToolClass,
+} from './tools.ts'
 
 /** The correlation id joining every record of one tool call. */
 export function callCorrelationUid(sessionId: string, callId: string): string {
@@ -30,9 +40,28 @@ function argumentsOf(data: unknown): ParsedArguments {
   return record === undefined ? { error: 'tool arguments are not a JSON object' } : { record }
 }
 
-/** The `api` object for tools that map to API Activity; other classes carry none. */
-function apiOf(toolClass: ToolClass, toolName: string): { operation: string } | undefined {
-  return toolClass === 'api' ? { operation: `tool:${toolName}` } : undefined
+/**
+ * The extension attributes every record of one tool call repeats, so a
+ * `tool/result` is filterable on the same keys as its `tool/call`.
+ * @param toolClass - the tool's class.
+ * @param toolName - the tool name the model called.
+ * @param delegationProvider - the harness a delegation tool hands the task to.
+ * @returns MCP attribution and delegation attributes, where they apply.
+ */
+function identityAttributes(
+  toolClass: ToolClass,
+  toolName: string,
+  delegationProvider: string | undefined,
+): Readonly<Record<string, JsonValue>> {
+  const mcp = parseMcpToolName(toolName)
+  return {
+    ...mcp === undefined ? {} : { mcp_server: mcp.server, mcp_tool: mcp.tool },
+    ...toolClass !== 'delegation-external' ? {} : {
+      delegation_provider: delegationProvider ?? 'unknown',
+      delegation_boundary: true,
+      delegation_coverage: DELEGATION_COVERAGE,
+    },
+  }
 }
 
 /**
@@ -53,7 +82,7 @@ function subjectOf(
   name: string,
   call: PendingCall | undefined,
 ): Pick<EventMapping, 'process' | 'file' | 'httpRequest'> {
-  if (toolClass === 'process-launch' || toolClass === 'process-terminate') {
+  if (toolClass === 'process-launch' || toolClass === 'process-terminate' || toolClass === 'delegation-external') {
     return { process: call?.process ?? { name } }
   }
   if (toolClass === 'file-read' || toolClass === 'file-write' || toolClass === 'file-update') {
@@ -90,16 +119,23 @@ export function mapToolCall(
   const api = apiOf(toolClass, name)
   state.openCall({
     callId, name, toolClass, time: event.time, seq: event.seq, turn, step,
+    ...config.delegationTools[name] === undefined ? {} : { delegationProvider: config.delegationTools[name] },
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
   })
+  const delegating = toolClass === 'delegation-external'
   return {
     classUid,
     activityId,
-    severityId: SEVERITY.informational,
+    // A delegation call is the last thing this plugin will see of the work it
+    // starts, so it is graded high rather than left to look like any other call.
+    severityId: delegating ? SEVERITY.high : SEVERITY.informational,
     statusId: STATUS.unknown,
-    message: `tool call ${name}`,
+    message: delegating
+      ? `tool call ${name} delegates to ${config.delegationTools[name] ?? 'an external harness'}; `
+        + 'session telemetry coverage ends at this boundary'
+      : `tool call ${name}`,
     correlationUid: callCorrelationUid(sessionId, callId),
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
@@ -142,6 +178,7 @@ function settle(
   const { classUid, activityId } = ocsfClassOf(toolClass)
   const name = call?.name ?? fallbackName
   const error = readNested(event.data, 'error')
+  const api = apiOf(toolClass, name)
   return {
     classUid,
     activityId,
@@ -151,7 +188,7 @@ function settle(
     message: `tool result ${name}`,
     correlationUid: callCorrelationUid(sessionId, callId),
     ...call === undefined ? {} : { startTime: call.time, duration: Math.max(0, event.time - call.time) },
-    ...toolClass === 'api' ? { api: { operation: `tool:${name}` } } : {},
+    ...api === undefined ? {} : { api },
     ...subjectOf(toolClass, name, call),
     attributes: {
       tool: name,
@@ -161,6 +198,7 @@ function settle(
       is_error: isError,
       turn: readNumber(event.data, 'turn') ?? call?.turn ?? 0,
       step: readNumber(event.data, 'step') ?? call?.step ?? 0,
+      ...identityAttributes(toolClass, name, call?.delegationProvider ?? config.delegationTools[name]),
       ...call === undefined ? { unpaired: true } : { call_seq: call.seq },
       ...extra,
     },
@@ -208,8 +246,10 @@ export function mapCodeDispatchStart(
   const toolClass = classifyTool(name, config)
   const { classUid, activityId } = ocsfClassOf(toolClass)
   const details = toolDetails(name, toolClass, argumentsOf(event.data), config)
+  const api = apiOf(toolClass, name)
   state.openCall({
     callId: subCallId, name, toolClass, time: event.time, seq: event.seq, turn: 0, step: 0,
+    ...config.delegationTools[name] === undefined ? {} : { delegationProvider: config.delegationTools[name] },
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
@@ -217,14 +257,14 @@ export function mapCodeDispatchStart(
   return {
     classUid,
     activityId,
-    severityId: SEVERITY.informational,
+    severityId: toolClass === 'delegation-external' ? SEVERITY.high : SEVERITY.informational,
     statusId: STATUS.unknown,
     message: `code-mode sub-call ${name}`,
     correlationUid: callCorrelationUid(sessionId, subCallId),
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
-    ...toolClass === 'api' ? { api: { operation: `tool:${name}` } } : {},
+    ...api === undefined ? {} : { api },
     observables: details.observables,
     attributes: {
       ...details.attributes,
@@ -274,6 +314,7 @@ export function mapCodeDispatch(
  */
 export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: number): EventMapping {
   const { classUid, activityId } = ocsfClassOf(call.toolClass)
+  const api = apiOf(call.toolClass, call.name)
   return {
     classUid,
     activityId,
@@ -283,7 +324,7 @@ export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: nu
     correlationUid: callCorrelationUid(sessionId, call.callId),
     startTime: call.time,
     duration: Math.max(0, time - call.time),
-    ...call.toolClass === 'api' ? { api: { operation: `tool:${call.name}` } } : {},
+    ...api === undefined ? {} : { api },
     ...subjectOf(call.toolClass, call.name, call),
     attributes: {
       tool: call.name,
@@ -294,6 +335,7 @@ export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: nu
       turn: call.turn,
       step: call.step,
       call_seq: call.seq,
+      ...identityAttributes(call.toolClass, call.name, call.delegationProvider),
     },
   }
 }

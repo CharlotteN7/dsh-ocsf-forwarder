@@ -15,9 +15,10 @@ import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { resolveConfig, type Config } from './config.ts'
+import { discoverDelegationTools, mergeDelegationTools, type RegistryLike } from './delegation.ts'
 import { Forwarder } from './forwarder.ts'
 import { createEnvironment } from './ocsf/record.ts'
-import { OtlpShipper } from './sink/otlp.ts'
+import { Shipper } from './sink/shipper.ts'
 import { FanOutSink, SpoolSink, type Sink } from './sink/spool.ts'
 
 export { Config } from './config.ts'
@@ -26,12 +27,16 @@ export type {
   CommandLinePolicy,
   ConfigurableToolClass,
   ExtensionPlacement,
+  HecTokenSource,
   HmacKeySource,
   ResolvedConfig,
+  ResolvedShipper,
   SeedReplay,
+  ShipperConfig,
   UrlPolicy,
 } from './config.ts'
 export type { OcsfRecord } from './ocsf/types.ts'
+export type { Transport, BatchOutcome } from './sink/transport.ts'
 export { Forwarder } from './forwarder.ts'
 
 /** Display metadata; labels the plugin in Cordis diagnostics. */
@@ -60,7 +65,17 @@ const PLUGIN_VERSION = (JSON.parse(
  * @param config - validated `cordis.yml` configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  const resolved = resolveConfig(config)
+  const base = resolveConfig(config)
+  // The provider a delegation tool starts runs on is fixed per plugin row and
+  // absent from the tool-call payload, so the composed rows are read here —
+  // the earliest point the registry is populated — rather than guessed later.
+  const resolved = {
+    ...base,
+    delegationTools: mergeDelegationTools(
+      discoverDelegationTools(ctx.registry as unknown as RegistryLike),
+      base.delegationTools,
+    ),
+  }
   const env = createEnvironment(resolved, PLUGIN_VERSION)
   const report = (error: unknown): void => {
     ctx.logger.warn(`ocsf-forwarder: ${error instanceof Error ? error.message : String(error)}`)
@@ -71,6 +86,7 @@ export function apply(ctx: Context, config: Config): void {
     path: resolved.spoolPath,
     maxBytes: resolved.spoolMaxBytes,
     maxGenerations: resolved.spoolMaxGenerations,
+    maxTotalBytes: resolved.spoolMaxTotalBytes,
     mode: SOC_SPOOL_MODE,
     onWarn: warn,
   })
@@ -80,15 +96,16 @@ export function apply(ctx: Context, config: Config): void {
       path: resolved.restrictedPath,
       maxBytes: resolved.spoolMaxBytes,
       maxGenerations: resolved.spoolMaxGenerations,
+      maxTotalBytes: resolved.spoolMaxTotalBytes,
       mode: RESTRICTED_SPOOL_MODE,
       onWarn: warn,
     })
   const sinks: Sink[] = restricted === undefined ? [soc] : [soc, restricted]
   const closing = new FanOutSink(sinks, report)
 
-  const shipper = resolved.otlp === undefined
+  const shipper = resolved.shipper === undefined
     ? undefined
-    : new OtlpShipper(resolved.otlp, resolved.spoolPath, env.productName, undefined, report)
+    : new Shipper(resolved.shipper, resolved.spoolPath, undefined, report)
   shipper?.start()
 
   const forwarder = new Forwarder(env, resolved, soc, restricted, report)
@@ -113,24 +130,43 @@ export function apply(ctx: Context, config: Config): void {
 
   // Counters nobody reads are counters nobody acts on: a forwarder that has
   // been failing every write since mount looks exactly like an idle one until
-  // this line appears in the log.
-  const reportStats = (): void => {
+  // this line appears in the log. The heartbeat carries the same counters to
+  // the SIEM, where "this host went quiet" is detectable and a log line is not.
+  const mountedAt = Date.now()
+  const tick = (final: boolean): void => {
     const stats = forwarder.stats()
     ctx.logger.info(
       `ocsf-forwarder: forwarded=${String(stats.forwarded)} dropped=${String(stats.dropped)} `
       + `unreadable=${String(stats.unreadable)} failed=${String(stats.failed)}`,
     )
+    const pressure = soc.pressure()
+    forwarder.heartbeat({
+      liveSessions: ctx.sessions.list().length,
+      stats,
+      spoolBytes: pressure.totalBytes,
+      spoolHighWaterBytes: resolved.spoolHighWaterBytes,
+      rotationStopped: pressure.rotationStopped,
+      uptimeMs: Date.now() - mountedAt,
+      final,
+      ...shipper === undefined || resolved.shipper === undefined ? {} : {
+        cursor: shipper.cursor(),
+        quarantined: shipper.quarantinedCount(),
+        destination: resolved.shipper.transport.kind,
+      },
+    })
   }
   const statsTimer = resolved.statsIntervalMs > 0
-    ? setInterval(reportStats, resolved.statsIntervalMs)
+    ? setInterval(() => { tick(false) }, resolved.statsIntervalMs)
     : undefined
   statsTimer?.unref()
 
   ctx.effect(() => async () => {
     if (statsTimer !== undefined) clearInterval(statsTimer)
+    // The final heartbeat is written before the shipper stops, so the record
+    // that says this forwarder went away can still leave the host.
+    tick(true)
     shipper?.stop()
     if (shipper !== undefined) await shipper.drain()
     closing.close()
-    reportStats()
   }, 'ocsf forwarder')
 }

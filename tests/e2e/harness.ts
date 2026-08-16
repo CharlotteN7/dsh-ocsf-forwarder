@@ -128,6 +128,16 @@ export function dshOf(record: OcsfLine): Record<string, unknown> {
   return record.unmapped.dsh
 }
 
+/**
+ * Whether one record is the forwarder reporting on itself rather than on a
+ * session. A heartbeat belongs to no session, so it carries no session id.
+ * @param record - the record read back from the spool.
+ * @returns true for a heartbeat.
+ */
+export function isHeartbeat(record: OcsfLine): boolean {
+  return dshOf(record)['kind'] === 'heartbeat'
+}
+
 /** Recursively collect every file under `dir`; missing directories yield nothing. */
 function filesUnder(dir: string): string[] {
   let entries: string[]

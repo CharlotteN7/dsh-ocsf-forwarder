@@ -43,6 +43,14 @@ export interface SpoolOptions {
   readonly maxBytes: number
   /** How many rotated generations may exist before rotation stops. */
   readonly maxGenerations: number
+  /**
+   * Bytes across the live file and every rotated generation before rotation
+   * stops. The second stop condition, on the same refuse-to-rotate terms as
+   * {@link SpoolOptions.maxGenerations}: `spoolMaxGenerations` bounds the file
+   * count, which bounds nothing about the disk once the live file is the one
+   * growing.
+   */
+  readonly maxTotalBytes: number
   /** File mode; the restricted lane uses 0o600. */
   readonly mode: number
   /** Reports a condition an operator must act on; must not throw. */
@@ -82,6 +90,33 @@ export function rotatedGenerations(spoolPath: string): readonly string[] {
 /** The timestamp part of a generation name: an ISO instant with path-safe separators. */
 function stamp(now: number): string {
   return new Date(now).toISOString().replace(/:/g, '-')
+}
+
+/** Size of one file, or zero when it has been removed under us. */
+function sizeOf(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    // ENOENT only: the shipper unlinks a generation the moment it is drained.
+    return 0
+  }
+}
+
+/**
+ * Bytes one spool occupies across its live file and every rotated generation.
+ * @param spoolPath - the live spool path.
+ * @returns the total size in bytes.
+ */
+export function spoolTotalBytes(spoolPath: string): number {
+  return [spoolPath, ...rotatedGenerations(spoolPath)].reduce((sum, file) => sum + sizeOf(file), 0)
+}
+
+/** What a spool can say about its own disk pressure. */
+export interface SpoolPressure {
+  /** Bytes across the live file and every rotated generation. */
+  readonly totalBytes: number
+  /** True once a stop condition has held rotation and the live file is growing past `maxBytes`. */
+  readonly rotationStopped: boolean
 }
 
 /**
@@ -169,6 +204,14 @@ export class SpoolSink implements Sink {
     if (this.bytes >= this.options.maxBytes) this.rotate()
   }
 
+  /**
+   * What this spool currently occupies, and whether rotation has stopped.
+   * @returns the disk pressure a heartbeat reports.
+   */
+  pressure(): SpoolPressure {
+    return { totalBytes: spoolTotalBytes(this.options.path), rotationStopped: this.rotationRefused }
+  }
+
   /** Close the descriptor and release the path's lock; further writes are ignored. */
   close(): void {
     if (this.fd !== undefined) {
@@ -190,19 +233,21 @@ export class SpoolSink implements Sink {
   /**
    * Rename the full file to a fresh generation and reopen an empty one.
    *
-   * Rotation stops once `maxGenerations` un-drained generations exist. The
-   * live file then grows past `maxBytes`, which is loud and recoverable;
-   * deleting a generation to make room would destroy the only copy of records
-   * the collector has not acknowledged.
+   * Rotation stops once either bound is reached — `maxGenerations` un-drained
+   * generations, or `maxTotalBytes` on disk. The live file then grows past
+   * `maxBytes`, which is loud and recoverable; deleting a generation to make
+   * room would destroy the only copy of records the collector has not
+   * acknowledged. An audit lane may run out of disk. It may not quietly delete
+   * the evidence it exists to keep.
    */
   private rotate(): void {
     if (this.fd === undefined) return
-    if (rotatedGenerations(this.options.path).length >= this.options.maxGenerations) {
+    const reason = this.rotationBlockedBy()
+    if (reason !== undefined) {
       if (!this.rotationRefused) {
         this.rotationRefused = true
         this.options.onWarn?.(
-          `spool ${this.options.path} has ${String(this.options.maxGenerations)} un-drained rotated generations; `
-          + 'growing past spoolMaxBytes instead of deleting unshipped records',
+          `spool ${this.options.path} ${reason}; growing past spoolMaxBytes instead of deleting unshipped records`,
         )
       }
       return
@@ -216,6 +261,22 @@ export class SpoolSink implements Sink {
     renameSync(this.options.path, `${this.options.path}.${current}-${String(this.counter).padStart(COUNTER_DIGITS, '0')}`)
     this.fd = this.open()
     this.bytes = 0
+  }
+
+  /**
+   * Which stop condition, if either, holds rotation right now.
+   * @returns the condition, phrased for the operator, or `undefined` to rotate.
+   */
+  private rotationBlockedBy(): string | undefined {
+    const generations = rotatedGenerations(this.options.path).length
+    if (generations >= this.options.maxGenerations) {
+      return `has ${String(this.options.maxGenerations)} un-drained rotated generations`
+    }
+    const total = spoolTotalBytes(this.options.path)
+    if (total >= this.options.maxTotalBytes) {
+      return `occupies ${String(total)} bytes, at or past spoolMaxTotalBytes (${String(this.options.maxTotalBytes)})`
+    }
+    return undefined
   }
 
   /** Drop the lock file so another process may take the path. */

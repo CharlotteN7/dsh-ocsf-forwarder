@@ -50,6 +50,16 @@ function spooled(spoolPath: string): OcsfRecord[] {
     .map(line => JSON.parse(line) as OcsfRecord)
 }
 
+/** Whether one record is the forwarder reporting on itself rather than on a session. */
+function isHeartbeat(record: OcsfRecord): boolean {
+  return dshOf(record)['kind'] === 'heartbeat'
+}
+
+/** The spooled records that describe a session, with the forwarder's own heartbeats removed. */
+function sessionRecords(spoolPath: string): OcsfRecord[] {
+  return spooled(spoolPath).filter(record => !isHeartbeat(record))
+}
+
 describe('plugin exports', () => {
   it('declares its name and the service it needs', () => {
     expect(name).toBe('dsh-ocsf-forwarder')
@@ -91,6 +101,57 @@ describe('mounting', () => {
     expect(dshOf(records[1] as OcsfRecord)['unresolved']).toBe(true)
   })
 
+  it('adopts a session that was already live when it mounted', async () => {
+    const spoolPath = join(home, 'ocsf', 'session.jsonl')
+    const ctx = new Context()
+    const existing = session('s0')
+    existing.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    Object.assign(existing, { firstLiveSeq: 1, seq: 1 })
+    ctx.reflect.provide('sessions', { list: () => [existing] })
+    const fiber = ctx.plugin(plugin, { spoolPath, seedReplay: 'boundary' })
+    await fiber
+
+    expect(spooled(spoolPath)).toHaveLength(1)
+    await fiber.dispose()
+  })
+
+  it('reads the composed delegation rows out of the registry at mount', async () => {
+    const spoolPath = join(home, 'ocsf', 'session.jsonl')
+    const ctx = new Context()
+    ctx.reflect.provide('sessions', { list: () => [] })
+    // A stand-in for the row `@deepseek-ai/dsh-tool-subagent` mounts: the
+    // plugin's display name and its `provider` / `toolName` config are the
+    // only parts this forwarder reads.
+    const toolSubagent = {
+      name: 'tool-subagent',
+      apply: (_ctx: Context, _config: { provider: string; toolName: string }) => {},
+    }
+    await ctx.plugin(toolSubagent, { provider: 'claude-code', toolName: 'handoff' })
+    const fiber = ctx.plugin(plugin, { spoolPath })
+    await fiber
+
+    const subject = session('s1')
+    subject.events.push({
+      type: 'tool/call',
+      seq: 0,
+      time: 1_000,
+      data: { turn: 1, step: 0, callId: 'c1', name: 'handoff', arguments: '{"prompt":"go"}' },
+    } as SessionEvent)
+    emitEvent(ctx, subject, subject.events[0] as SessionEvent)
+
+    const record = spooled(spoolPath)[0] as OcsfRecord
+    expect(record.severity_id).toBe(4)
+    expect(dshOf(record)['delegation_provider']).toBe('claude-code')
+    await fiber.dispose()
+  })
+
+  it('heartbeats on its interval, not only at unload', async () => {
+    const { spoolPath, unload } = await mounted({ statsIntervalMs: 10 })
+    await new Promise<void>(resolve => setTimeout(resolve, 60))
+    expect(spooled(spoolPath).filter(isHeartbeat).length).toBeGreaterThan(1)
+    await unload()
+  })
+
   it('adopts a session announced after mount', async () => {
     const { ctx, spoolPath } = await mounted({ seedReplay: 'boundary' })
     const subject = session('s2')
@@ -116,15 +177,55 @@ describe('mounting', () => {
     emitEvent(ctx, subject, subject.events[0] as SessionEvent)
     // Teardown drains once; the unreachable collector leaves the spool intact.
     await unload()
-    expect(spooled(spoolPath)).toHaveLength(1)
+    expect(sessionRecords(spoolPath)).toHaveLength(1)
   })
 
   it('releases the spool on unload, so the same path can be mounted again', async () => {
     const { spoolPath, unload } = await mounted()
     await unload()
-    expect(statSync(spoolPath).size).toBe(0)
+    expect(sessionRecords(spoolPath)).toHaveLength(0)
     const again = await mounted()
     await again.unload()
+  })
+
+  it('spools a heartbeat at unload, so a host that went away says so through the SIEM', async () => {
+    const { ctx, spoolPath, unload } = await mounted({ statsIntervalMs: 0 })
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    emitEvent(ctx, subject, subject.events[0] as SessionEvent)
+    await unload()
+
+    const beats = spooled(spoolPath).filter(isHeartbeat)
+    expect(beats).toHaveLength(1)
+    const attributes = dshOf(beats[0] as OcsfRecord)
+    expect(beats[0]?.class_uid).toBe(6002)
+    expect(attributes['forwarded']).toBe(1)
+    expect(attributes['final']).toBe(true)
+    expect(attributes['live_sessions']).toBe(0)
+    expect(attributes['spool_bytes']).toBeGreaterThan(0)
+    expect(attributes['shipper_cursor']).toBeUndefined()
+  })
+
+  it('reports the shipper cursor on the heartbeat when a destination is configured', async () => {
+    const { spoolPath, unload } = await mounted({
+      statsIntervalMs: 0,
+      otlp: { endpoint: 'http://127.0.0.1:1/v1/logs', flushIntervalMs: 60_000 },
+    })
+    await unload()
+    const attributes = dshOf(spooled(spoolPath).filter(isHeartbeat)[0] as OcsfRecord)
+    expect(attributes['shipper_cursor']).toBe(0)
+    expect(attributes['shipper_destination']).toBe('otlp')
+  })
+
+  it('mints an install uid beside the spool and stamps it on every record', async () => {
+    const { ctx, spoolPath } = await mounted()
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    emitEvent(ctx, subject, subject.events[0] as SessionEvent)
+
+    const installUid = readFileSync(`${spoolPath}.install-uid`, 'utf8').trim()
+    expect(installUid).toMatch(/^[0-9a-f-]{36}$/)
+    expect(spooled(spoolPath)[0]?.device?.uid).toBe(installUid)
   })
 
   it('reports its counters to the log, so a broken forwarder does not read as an idle one', async () => {

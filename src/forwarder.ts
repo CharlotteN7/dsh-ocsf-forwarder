@@ -12,6 +12,7 @@
 
 import type { ResolvedConfig } from './config.ts'
 import { SessionState } from './correlate.ts'
+import { mapHeartbeat, type HeartbeatState } from './map/heartbeat.ts'
 import { mapEvent, type MappableEvent } from './map/index.ts'
 import { mapSeedBoundary } from './map/lifecycle.ts'
 import { mapUnresolvedApproval } from './map/authorization.ts'
@@ -52,6 +53,8 @@ export class Forwarder {
   private dropped = 0
   private unreadable = 0
   private failed = 0
+  /** Heartbeats emitted by this process; the sequence a consumer detects gaps in. */
+  private heartbeats = 0
 
   /**
    * @param env - the per-process record identity.
@@ -71,6 +74,35 @@ export class Forwarder {
   /** Current counters. */
   stats(): ForwarderStats {
     return { forwarded: this.forwarded, dropped: this.dropped, unreadable: this.unreadable, failed: this.failed }
+  }
+
+  /**
+   * Write one heartbeat, so a host that goes quiet is distinguishable from one
+   * that is idle.
+   *
+   * It belongs to no session: `metadata.uid` is keyed on the install uid and a
+   * per-process counter, and no `ai_agent.instance_uid` is set. It is
+   * deliberately absent from the counters it reports — a self-report that
+   * counted itself would make two consecutive heartbeats differ by one with no
+   * session activity behind the difference.
+   * @param state - what this heartbeat reports.
+   */
+  heartbeat(state: HeartbeatState): void {
+    this.contain(() => {
+      const sequence = this.heartbeats
+      this.heartbeats += 1
+      const time = Date.now()
+      const subject: RecordSubject = {
+        seq: sequence,
+        time,
+        eventType: 'forwarder/heartbeat',
+        replayed: false,
+        uid: `${this.env.config.fleet.installUid}:heartbeat:${String(sequence)}`,
+      }
+      const record = buildRecord(this.env, subject, mapHeartbeat(state))
+      this.sink.write(record)
+      this.restricted?.write(record)
+    })
   }
 
   /**
@@ -198,6 +230,9 @@ export class Forwarder {
       time: event.time,
       eventType: event.type,
       replayed: event.seq < session.firstLiveSeq,
+      // The session log's native rendering of the append time, passed through
+      // rather than reformatted; the normalised value is `time`.
+      originalTime: String(event.time),
     }, mapping, event.data)
   }
 
@@ -205,7 +240,7 @@ export class Forwarder {
   private deliver(
     session: ForwardableSession,
     state: SessionState,
-    subject: Pick<RecordSubject, 'seq' | 'time' | 'eventType' | 'replayed'> & { uid?: string },
+    subject: Pick<RecordSubject, 'seq' | 'time' | 'eventType' | 'replayed' | 'originalTime' | 'uid'>,
     mapping: EventMapping,
     payload: unknown,
   ): void {

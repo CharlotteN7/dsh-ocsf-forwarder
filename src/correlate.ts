@@ -30,6 +30,12 @@ export interface PendingCall {
   readonly process?: OcsfProcess
   readonly file?: OcsfFile
   readonly httpRequest?: OcsfHttpRequest
+  /**
+   * The harness a `delegation-external` call hands the task to. Kept on the
+   * call because the flush that reports an abandoned delegation runs without
+   * the configuration that named the provider.
+   */
+  readonly delegationProvider?: string
 }
 
 /** One approval question awaiting its decision. */

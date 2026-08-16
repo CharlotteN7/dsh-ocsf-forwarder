@@ -8,6 +8,9 @@ export function testConfig(overrides: Partial<Config> = {}): ResolvedConfig {
   return resolveConfig({
     spoolPath: '/tmp/does-not-exist/ocsf.jsonl',
     privacy: { hmacKey: { source: 'literal', value: 'k'.repeat(32) } },
+    // An explicit install uid keeps `device.uid` reproducible and stops
+    // resolution from minting one on disk for a path no test writes to.
+    fleet: { installUid: 'install-test' },
     ...overrides,
   })
 }

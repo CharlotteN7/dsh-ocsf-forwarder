@@ -15,6 +15,7 @@ import {
   CATEGORY_OF_CLASS,
   CLASS,
   OCSF_VERSION,
+  PRODUCT_NAME,
   USER_TYPE_USER,
   type ClassUid,
   typeUid,
@@ -77,9 +78,11 @@ export function createEnvironment(
   const host = hostname()
   return {
     config,
-    productName: 'dsh-ocsf-forwarder',
+    productName: PRODUCT_NAME,
     productVersion,
-    device: { type_id: 0, hostname: host, os: { name: platform(), type_id: 0 } },
+    // `device.uid` is the stable install identity: a renamed laptop keeps it,
+    // and two hosts imaged from one template do not share it.
+    device: { type_id: 0, hostname: host, uid: config.fleet.installUid, os: { name: platform(), type_id: 0 } },
     actor: { process: { pid: process.pid, name: 'dsh' }, user },
     user,
     srcEndpoint: { hostname: host, svc_name: AGENT_NAME },
@@ -89,10 +92,22 @@ export function createEnvironment(
 
 /** The session-level facts a record needs beyond the event itself. */
 export interface RecordSubject {
-  readonly sessionId: string
+  /**
+   * The session the record describes. Absent for a record the forwarder
+   * generates about itself rather than about a session — the heartbeat — which
+   * therefore carries no `ai_agent.instance_uid` to misattribute.
+   */
+  readonly sessionId?: string
   readonly seq: number
   readonly time: number
   readonly eventType: string
+  /**
+   * `metadata.original_time`: the event's time exactly as the session log
+   * recorded it. OCSF wants a pass-through string in the source's native
+   * format, not a normalisation, and says to omit it for a generated event —
+   * so the heartbeat sets nothing here.
+   */
+  readonly originalTime?: string
   /** True when the record was produced by seed replay rather than the live firehose. */
   readonly replayed: boolean
   /** Overrides the default `<session id>:<seq>` idempotency key for synthetic records. */
@@ -111,6 +126,8 @@ export interface RecordSubject {
 export interface EventMapping {
   readonly classUid: ClassUid
   readonly activityId: number
+  /** `activity_name`, which OCSF expects alongside an `activity_id` of 99. */
+  readonly activityName?: string
   readonly severityId: number
   readonly statusId?: number
   readonly statusDetail?: string
@@ -151,7 +168,7 @@ export function buildRecord(
   const { config } = env
   const attributes: DshAttributes = {
     v: DSH_ATTRIBUTES_VERSION,
-    session_id: subject.sessionId,
+    ...subject.sessionId === undefined ? {} : { session_id: subject.sessionId },
     event_type: subject.eventType,
     seq: subject.seq,
     replayed: subject.replayed,
@@ -166,6 +183,7 @@ export function buildRecord(
     category_uid: CATEGORY_OF_CLASS[mapping.classUid],
     type_uid: typeUid(mapping.classUid, mapping.activityId),
     activity_id: mapping.activityId,
+    activity_name: mapping.activityName,
     severity_id: mapping.severityId,
     status_id: mapping.statusId,
     status_detail: mapping.statusDetail,
@@ -195,11 +213,24 @@ export function buildRecord(
       }],
       log_provider: AGENT_NAME,
       log_name: 'session',
-      uid: subject.uid ?? `${subject.sessionId}:${subject.seq}`,
+      uid: subject.uid ?? `${String(subject.sessionId)}:${String(subject.seq)}`,
       correlation_uid: mapping.correlationUid,
       sequence: subject.seq,
       logged_time: env.now(),
+      original_time: subject.originalTime,
+      // Fleet identity: the three `metadata` slots a multi-team SOC filters on.
+      // Each is omitted rather than defaulted, because an invented tenant is
+      // worse than an absent one.
+      tenant_uid: config.fleet.tenantUid,
+      labels: config.fleet.labels,
+      tags: config.fleet.tags,
     }),
+    // Application Lifecycle constrains `at_least_one: [app, application]`, and
+    // `app` is deprecated as of 1.9.0. The application whose lifecycle these
+    // records describe is the harness, not this forwarder.
+    application: mapping.classUid === CLASS.applicationLifecycle
+      ? { name: AGENT_NAME, uid: config.fleet.installUid }
+      : undefined,
     // Required by the declared `cloud` and `osint` profiles and meaningless for
     // a host agent; emitted so records validate rather than fail ingestion.
     cloud: { provider: 'Other' },

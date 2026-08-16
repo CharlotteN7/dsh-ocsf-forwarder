@@ -30,11 +30,35 @@ export interface OcsfExtension {
   readonly version: string
 }
 
+/** One `key_value_object` entry, as `metadata.tags` requires. */
+export interface OcsfKeyValue {
+  readonly name: string
+  readonly value: string
+}
+
+/**
+ * An `application` object. Application Lifecycle constrains
+ * `at_least_one: [app, application]` and deprecated `app` in 1.9.0, so every
+ * record of that class carries this.
+ */
+export interface OcsfApplication {
+  readonly name: string
+  readonly uid?: string
+}
+
 /** `metadata` — required on every OCSF event. */
 export interface OcsfMetadata {
   readonly product: OcsfProduct
   readonly version: string
   readonly profiles?: readonly string[]
+  /** The org or business-unit key a multi-team SOC filters on. */
+  readonly tenant_uid?: string
+  /** Free tags, typically the deployment environment. */
+  readonly labels?: readonly string[]
+  /** Name/value pairs; OCSF types this as an array of `key_value_object`, not a map. */
+  readonly tags?: readonly OcsfKeyValue[]
+  /** The event's time as the session log recorded it, passed through unnormalised. */
+  readonly original_time?: string
   /** `metadata.extension` has been deprecated since OCSF 1.1.0 in favour of this list. */
   readonly extensions?: readonly OcsfExtension[]
   readonly log_provider?: string
@@ -124,6 +148,8 @@ export interface OcsfNetworkEndpoint {
 export interface OcsfDevice {
   readonly type_id: number
   readonly hostname: string
+  /** The stable install uid, so a renamed host is still the same device. */
+  readonly uid?: string
   readonly os?: { readonly name: string; readonly type_id: number }
 }
 
@@ -167,9 +193,13 @@ export interface OcsfRecord {
   readonly category_uid: number
   readonly type_uid: number
   readonly activity_id: number
+  /** Set alongside an `activity_id` of 99, which OCSF leaves to the producer to name. */
+  readonly activity_name?: string
   readonly severity_id: number
   readonly time: number
   readonly metadata: OcsfMetadata
+  /** Required by Application Lifecycle's `at_least_one: [app, application]` constraint. */
+  readonly application?: OcsfApplication
   /** Required by every class we emit and meaningless on a host agent; see README. */
   readonly cloud: { readonly provider: string }
   /** Required by every class we emit; always empty for a first-party producer. */

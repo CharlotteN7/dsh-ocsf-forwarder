@@ -1,8 +1,20 @@
 /** Configuration validation and the load-time failures it is responsible for. */
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Config, DEFAULT_DROPPED_EVENT_TYPES, resolveConfig } from '../../src/config.ts'
 
-const minimal = { spoolPath: '/var/log/dsh/ocsf.jsonl' }
+/**
+ * An explicit install uid keeps resolution off the filesystem for every test
+ * that is not about the install uid itself.
+ */
+const minimal = { spoolPath: '/var/log/dsh/ocsf.jsonl', fleet: { installUid: 'install-test' } }
+
+let home: string
+
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'dsh-ocsf-config-')) })
+afterEach(() => { rmSync(home, { recursive: true, force: true }) })
 
 describe('Config validation', () => {
   it('rejects configuration without a spool path', () => {
@@ -89,13 +101,13 @@ describe('resolution', () => {
 
   it('appends the logs path to a bare OTLP endpoint and derives the cursor path', () => {
     const resolved = resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318' } })
-    expect(resolved.otlp?.url).toBe('http://collector:4318/v1/logs')
-    expect(resolved.otlp?.cursorPath).toBe('/var/log/dsh/ocsf.jsonl.cursor')
+    expect(resolved.shipper?.transport.endpoint).toBe('http://collector:4318/v1/logs')
+    expect(resolved.shipper?.cursorPath).toBe('/var/log/dsh/ocsf.jsonl.cursor')
   })
 
   it('keeps an endpoint that already names a path', () => {
     const resolved = resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318/ingest/logs' } })
-    expect(resolved.otlp?.url).toBe('http://collector:4318/ingest/logs')
+    expect(resolved.shipper?.transport.endpoint).toBe('http://collector:4318/ingest/logs')
   })
 
   it('rejects an endpoint that is not a URL', () => {
@@ -108,14 +120,14 @@ describe('resolution', () => {
   })
 
   it('leaves the shipper off when no endpoint is configured', () => {
-    expect(resolveConfig(minimal).otlp).toBeUndefined()
+    expect(resolveConfig(minimal).shipper).toBeUndefined()
   })
 
   it('derives the quarantine path and bounds the read window and the backoff', () => {
     const resolved = resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318' } })
-    expect(resolved.otlp?.quarantinePath).toBe('/var/log/dsh/ocsf.jsonl.quarantine')
-    expect(resolved.otlp?.maxReadBytes).toBeGreaterThan(0)
-    expect(resolved.otlp?.maxBackoffMs).toBeGreaterThan(resolved.otlp?.flushIntervalMs ?? 0)
+    expect(resolved.shipper?.quarantinePath).toBe('/var/log/dsh/ocsf.jsonl.quarantine')
+    expect(resolved.shipper?.maxReadBytes).toBeGreaterThan(0)
+    expect(resolved.shipper?.maxBackoffMs).toBeGreaterThan(resolved.shipper?.flushIntervalMs ?? 0)
   })
 
   it('withholds a URL path by default, because a token rides there as readily as in a query', () => {
@@ -138,5 +150,94 @@ describe('resolution', () => {
   it('bounds the rotated generations that may await the shipper', () => {
     expect(resolveConfig(minimal).spoolMaxGenerations).toBeGreaterThan(1)
     expect(resolveConfig({ ...minimal, spoolMaxGenerations: 3 }).spoolMaxGenerations).toBe(3)
+  })
+
+  it('bounds the disk the spool may occupy, not only the file count', () => {
+    expect(resolveConfig(minimal).spoolMaxTotalBytes).toBeGreaterThan(0)
+    const resolved = resolveConfig({ ...minimal, spoolMaxTotalBytes: 4096, spoolHighWaterBytes: 2048 })
+    expect(resolved.spoolMaxTotalBytes).toBe(4096)
+    expect(resolved.spoolHighWaterBytes).toBe(2048)
+  })
+
+  it('keeps the high-water mark below the point rotation stops', () => {
+    expect(resolveConfig(minimal).spoolHighWaterBytes).toBeLessThan(resolveConfig(minimal).spoolMaxTotalBytes)
+    expect(() => resolveConfig({ ...minimal, spoolMaxTotalBytes: 1024, spoolHighWaterBytes: 4096 }))
+      .toThrow(/never fire before rotation stopped/)
+  })
+})
+
+describe('the Splunk destination', () => {
+  const splunkBase = { ...minimal, splunk: { endpoint: 'https://splunk.internal:8088' } }
+
+  it('posts to the HEC event endpoint and carries the Splunk authorization scheme', () => {
+    const resolved = resolveConfig(
+      { ...splunkBase, splunk: { ...splunkBase.splunk, token: { source: 'env' as const, variable: 'HEC' } } },
+      { HEC: 'abc-123' },
+    )
+    expect(resolved.shipper?.transport.endpoint).toBe('https://splunk.internal:8088/services/collector/event')
+    expect(resolved.shipper?.transport.headers['authorization']).toBe('Splunk abc-123')
+    expect(resolved.shipper?.transport.kind).toBe('splunk-hec')
+  })
+
+  it('fails loud when the token variable is unset, rather than shipping unauthenticated', () => {
+    expect(() => resolveConfig(
+      { ...splunkBase, splunk: { ...splunkBase.splunk, token: { source: 'env' as const, variable: 'HEC' } } },
+      {},
+    )).toThrow(/HEC/)
+    expect(() => resolveConfig(splunkBase, {})).toThrow(/token.variable is required/)
+    expect(() => resolveConfig(
+      { ...splunkBase, splunk: { ...splunkBase.splunk, token: { source: 'literal' as const } } },
+      {},
+    )).toThrow(/token.value is required/)
+  })
+
+  it('refuses two destinations on one cursor', () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      otlp: { endpoint: 'http://collector:4318' },
+      splunk: { endpoint: 'https://splunk.internal:8088', token: { source: 'literal', value: 't' } },
+    })).toThrow(/configure exactly one destination/)
+  })
+})
+
+describe('fleet identity', () => {
+  it('carries the tenant, labels and tags a multi-team SOC filters on', () => {
+    const resolved = resolveConfig({
+      ...minimal,
+      fleet: { installUid: 'i', tenantUid: 'acme', labels: ['prod'], tags: { owner: 'soc' } },
+    })
+    expect(resolved.fleet.tenantUid).toBe('acme')
+    expect(resolved.fleet.labels).toEqual(['prod'])
+    expect(resolved.fleet.tags).toEqual([{ name: 'owner', value: 'soc' }])
+  })
+
+  it('omits every fleet field that was not configured, rather than inventing one', () => {
+    const resolved = resolveConfig(minimal)
+    expect(resolved.fleet.tenantUid).toBeUndefined()
+    expect(resolved.fleet.labels).toBeUndefined()
+    expect(resolved.fleet.tags).toBeUndefined()
+  })
+
+  it('mints an install uid once and reuses it, so a renamed host is still the same device', () => {
+    const spoolPath = join(home, 'ocsf.jsonl')
+    const first = resolveConfig({ spoolPath }).fleet.installUid
+    const second = resolveConfig({ spoolPath }).fleet.installUid
+    expect(first).toMatch(/^[0-9a-f-]{36}$/)
+    expect(second).toBe(first)
+    expect(readFileSync(`${spoolPath}.install-uid`, 'utf8').trim()).toBe(first)
+  })
+
+  it('reads an install uid a deployment placed at the configured path', () => {
+    const installUidPath = join(home, 'fleet.uid')
+    writeFileSync(installUidPath, 'laptop-17\n')
+    expect(resolveConfig({ spoolPath: join(home, 'ocsf.jsonl'), fleet: { installUidPath } }).fleet.installUid)
+      .toBe('laptop-17')
+  })
+})
+
+describe('delegation tools', () => {
+  it('carries the configured delegation names into the resolved configuration', () => {
+    const resolved = resolveConfig({ ...minimal, delegationTools: { handoff: 'codex' } })
+    expect(resolved.delegationTools).toEqual({ handoff: 'codex' })
   })
 })

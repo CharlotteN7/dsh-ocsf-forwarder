@@ -18,6 +18,7 @@
     "ocsf",
     "siem",
     "otlp",
+    "splunk",
     "audit-log",
     "security"
   ],
@@ -37,7 +38,8 @@
   "files": [
     "lib/**/*.js",
     "lib/types/**/*.d.ts",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "splunk/props.conf"
   ],
   "dsh": {
     "bundle": {

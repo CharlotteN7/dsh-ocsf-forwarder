@@ -20,7 +20,10 @@ const REQUIRED: Readonly<Record<number, readonly string[]>> = Object.freeze({
   [CLASS.processActivity]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'device', 'actor', 'process'],
   [CLASS.authorizeSession]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'user', 'privileges'],
   [CLASS.httpActivity]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'http_request'],
-  [CLASS.applicationLifecycle]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata'],
+  // `application` is not in the class's required list; it is forced by the
+  // class constraint `at_least_one: [app, application]`, and `app` has been
+  // deprecated since 1.9.0.
+  [CLASS.applicationLifecycle]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'application'],
   [CLASS.apiActivity]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'actor', 'api', 'src_endpoint'],
 })
 
@@ -32,12 +35,15 @@ const BASE_EVENT_ATTRIBUTES: ReadonlySet<string> = new Set([
   'type_uid', 'unmapped',
   // Class-owned and profile-owned attributes the mappers fill.
   'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'http_request',
-  'job', 'message_context', 'privileges', 'process', 'src_endpoint', 'user',
+  'application', 'job', 'message_context', 'privileges', 'process', 'src_endpoint', 'user',
 ])
 
 /** One run covering every mapper, driven the way the session store drives one. */
 function emitted(): readonly OcsfRecord[] {
-  const config = testConfig()
+  const config = testConfig({
+    delegationTools: { subagent_claude_code: 'claude-code' },
+    fleet: { installUid: 'install-test', tenantUid: 'acme', labels: ['prod'], tags: { owner: 'soc' } },
+  })
   const records: OcsfRecord[] = []
   const sink: Sink = { write: record => { records.push(record) }, close: () => {} }
   const events: MappableEvent[] = [
@@ -65,12 +71,27 @@ function emitted(): readonly OcsfRecord[] {
     { type: 'agent/inbox/spliced', seq: 21, time: 1_021, data: { target: 'next-turn' } },
     { type: 'tool/call', seq: 22, time: 1_022, data: { turn: 1, step: 0, callId: 'never', name: 'bash', arguments: '{"command":"sleep 999"}' } },
     { type: 'approval/asked', seq: 23, time: 1_023, data: { id: 'a2', toolName: 'write' } },
+    { type: 'tool/call', seq: 24, time: 1_024, data: { turn: 1, step: 0, callId: 'c5', name: 'cordis_run', arguments: '{"pluginId":"p"}' } },
+    { type: 'tool/result', seq: 25, time: 1_025, data: { message: { source: { callId: 'c5' } } } },
+    { type: 'tool/call', seq: 26, time: 1_026, data: { turn: 1, step: 0, callId: 'c6', name: 'mcp__github__create_issue', arguments: '{"title":"x"}' } },
+    { type: 'tool/result', seq: 27, time: 1_027, data: { message: { source: { callId: 'c6' } } } },
+    { type: 'tool/call', seq: 28, time: 1_028, data: { turn: 1, step: 0, callId: 'c7', name: 'subagent_claude_code', arguments: '{"prompt":"go"}' } },
+    { type: 'tool/result', seq: 29, time: 1_029, data: { message: { source: { callId: 'c7' } } } },
   ]
   const session: ForwardableSession = { id: 'S1', firstLiveSeq: 0, seq: events.length, events, header: { cwd: '/srv' } }
   const forwarder = new Forwarder(testEnvironment(config), config, sink, undefined, error => { throw error })
   forwarder.adopt(session)
   for (const event of events) forwarder.observe(session, event)
   forwarder.dispose(session)
+  forwarder.heartbeat({
+    liveSessions: 1,
+    stats: forwarder.stats(),
+    spoolBytes: 0,
+    spoolHighWaterBytes: 1_000,
+    rotationStopped: false,
+    uptimeMs: 5,
+    final: true,
+  })
   return records
 }
 
@@ -118,5 +139,29 @@ describe('OCSF 1.9.0 conformance', () => {
     for (const record of records) {
       expect(record.type_uid).toBe(record.class_uid * 100 + record.activity_id)
     }
+  })
+
+  it('names an application on every Application Lifecycle record, as the class constraint demands', () => {
+    const lifecycle = records.filter(record => record.class_uid === CLASS.applicationLifecycle)
+    expect(lifecycle.length).toBeGreaterThan(0)
+    for (const record of lifecycle) {
+      expect(record.application?.name).toBe('deepseek-harness')
+    }
+  })
+
+  it('stamps the fleet identity onto every record', () => {
+    for (const record of records) {
+      expect(record.metadata.tenant_uid).toBe('acme')
+      expect(record.metadata.labels).toEqual(['prod'])
+      expect(record.metadata.tags).toEqual([{ name: 'owner', value: 'soc' }])
+      expect(record.device?.uid).toBe('install-test')
+    }
+  })
+
+  it('passes the log time through as original_time for a collected event, and omits it for a generated one', () => {
+    const collected = records.find(record => record.metadata.uid === 'S1:0')
+    expect(collected?.metadata.original_time).toBe('1000')
+    const heartbeat = records.find(record => record.metadata.uid?.includes(':heartbeat:'))
+    expect(heartbeat?.metadata.original_time).toBeUndefined()
   })
 })
