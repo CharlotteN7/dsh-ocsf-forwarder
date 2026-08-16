@@ -204,3 +204,163 @@ executable names, hostnames, URL scheme and host, and values drawn from a bounde
 build owns. Everything else is `HMAC-SHA256(key, value)` plus a character count. `privacy.url`
 defaults to `host` for the same reason — a reset token rides in a path as readily as in a query
 string — and `sanitized` is now the deliberate widening rather than the default.
+
+## 17. A transport is an encoder and a status classifier, and nothing else
+
+The shipper was already wire-format-agnostic: the cursor, the generation drain, the quarantine
+and the backoff never looked at OTLP. Only `otlpPayload()` and the single post call site did. So
+the seam is a `Transport { kind, endpoint, headers, contentType, encode, classify }`, and roughly
+300 lines of drain logic moved to `sink/shipper.ts` unchanged.
+
+The boundary is drawn where it is because a transport that could speak about delivery could
+re-derive cursor semantics, and there is exactly one correct answer there: the cursor advances
+after acceptance, never before. A transport says which of `accepted` / `retry` / `reject` a status
+means and hands back a body. It cannot see the cursor, the spool, or the quarantine file.
+
+`classify` takes the HTTP status and nothing else, which is a real limit: Splunk's HEC returns a
+JSON body whose `code` disambiguates a 400 that means "bad payload" from a 400 that means "bad
+token". Widening the seam to the response body was rejected — it is the first step towards a
+transport that decides delivery — and §18 records what that costs.
+
+## 18. What was verified about Splunk HEC, and where our reading of it differs
+
+The HEC contract in `PLAN-0.2.md` came from research notes that `docs.splunk.com` had refused to
+serve. It was re-verified on 2026-08-16 against Splunk's live documentation, which now lives on
+`help.splunk.com`. Confirmed: `POST {base}/services/collector/event` ("which is where all
+JSON-formatted event requests must go"); `Authorization: Splunk <token>`, with the REST reference
+adding "The format is case-sensitive"; a batch is "event objects stacked one after the other";
+`time` is UNIX time "in the format `<sec>.<ms>`", so epoch **seconds**, not milliseconds.
+
+Two claims in the plan were wrong. Splunk states "Both concatenated JSON objects and JSON arrays
+like this are accepted", so an array is not rejected — the concatenation we emit is the documented
+form, not the only accepted one. And Splunk publishes **no** retryable status set; the widely
+copied 400/401/403-are-permanent rule is the OpenTelemetry Collector's `splunkhecexporter`, not
+Splunk's.
+
+Our reading therefore departs from that exporter on 401 and 403. Splunk's own error table maps
+both to token problems — "Token is required", "Invalid authorization", "Token disabled", "Invalid
+token" — never to a bad batch. Quarantining a spool because a token was rotated would step the
+cursor over records that will deliver perfectly once the operator fixes the token, and quarantine
+is a one-way door: nothing re-reads that file. So a 401 or 403 holds the cursor and backs off, and
+the heartbeat's `shipper_cursor` is what tells the SOC delivery has stalled. 400 stays a refusal,
+even though Splunk returns "Invalid token" and "Token disabled" as 400 under codes 21 and 22,
+because it is the status a genuinely malformed batch arrives under and something has to keep one
+bad record from blocking every record behind it.
+
+429 is in the retry set on Splunk's authority, not the exporter's: codes 26 and 27, "HEC queue is
+at capacity" and "HEC ACK channel is at capacity", are 429.
+
+## 19. The heartbeat is 6002 plus an extension key, because OCSF has no slot for one
+
+An agent that stops reporting is indistinguishable from an agent that is idle. `metadata.sequence`
+detects a gap inside a session; it says nothing about a host that went quiet.
+
+OCSF 1.9.0 has no heartbeat, liveness, health-check, keepalive or checkpoint class. Enumerating
+all 87 classes at `https://schema.ocsf.io/api/1.9.0/classes` and searching name, caption and
+description for those words returns nothing. So the heartbeat is Application Lifecycle (6002) with
+`unmapped.dsh.kind: 'heartbeat'`, and the README says that plainly rather than implying a standard
+mapping.
+
+The activity is `Other` (99) with `activity_name: 'Heartbeat'`, not `Start` (3). The record reports
+that the application is still running, which is not the same claim as that it started, and 6002
+has no id for the difference.
+
+Two consequences fell out of reading the class definition rather than trusting the plan.
+`application_lifecycle` carries the constraint `at_least_one: [app, application]`, and `app` was
+deprecated in 1.9.0 — so **every** 6002 record this plugin emits now carries an `application`
+object naming the harness. The records emitted before this release did not, and would have failed
+a consumer that applied the published schema. And OCSF says to omit `metadata.original_time` for a
+generated event, so the heartbeat sets none while every record derived from a session event passes
+its log time through.
+
+The heartbeat is deliberately absent from the counters it reports. A self-report that counted
+itself would make two consecutive heartbeats differ by one with no session activity behind the
+difference, which is exactly the signal an idle-versus-broken check reads.
+
+## 20. Fleet identity is configured, never inferred
+
+`metadata.tenant_uid`, `metadata.labels` and `metadata.tags` were present in the schema and unused.
+Each is now a configuration field with no default: an invented tenant is worse than an absent one,
+because a SOC filter that silently matches the wrong records is harder to notice than one that
+matches none.
+
+`metadata.tags` is **not** a string list. OCSF types it as an array of `key_value_object`, each
+needing a `name` plus a `value`, so the configuration takes a map and resolution renders the array.
+`metadata.labels` is the string list.
+
+`device.uid` carries a stable install uid, minted with `randomUUID()` on first run and persisted
+beside the spool. A hostname is not an identity: it changes when a laptop is renamed and collides
+across a fleet imaged from one template. The uid also keys the heartbeat's `metadata.uid`, which is
+what lets a SIEM detect a *missing* heartbeat rather than only a malformed one.
+
+`metadata.original_time` is the session log's own rendering of the append time, passed through as a
+string. OCSF is explicit that it is "a pass-through string in its native format… not normalized" —
+the normalised value is the base event's `time` — so reformatting it as ISO 8601 would be the one
+thing the attribute exists not to be.
+
+## 21. The disk bound is a second stop condition, not a delete policy
+
+`spoolMaxGenerations` bounds the file count, which bounds nothing about the disk once the live file
+is the one growing — the stated limitation in §12. `spoolMaxTotalBytes` is a second stop condition
+on rotation, on exactly the same refuse-to-rotate terms. §12's reasoning is unchanged and is the
+reason this is not a retention policy: an audit lane may run out of disk, it may not silently
+delete unacknowledged evidence.
+
+What was missing was a louder, earlier alarm. `spoolHighWaterBytes` sits below the stop condition,
+and crossing it raises the heartbeat to `severity_id: 4`, so the SOC learns from the SIEM while
+there is still room. A high-water mark above the stop condition would never fire before rotation
+stopped, so that combination fails at load.
+
+## 22. The delegation boundary is read from the registry, and configuration may only widen it
+
+`subagent-claude-code` and `subagent-codex` resolve a real external CLI and spawn it in the parent
+session's workspace. There is no DSH session for the child, so no session event describes anything
+it does: telemetry coverage ends at the tool call. Until this release that boundary crossing was a
+generic 6003 record, indistinguishable from a calculator call.
+
+The provider name is fixed per plugin row and is **not** in the tool-call payload, so a record
+cannot name the destination harness from the event alone. What the payload carries is the tool
+name, and a `tool-subagent` row pairs a tool name with the provider it starts runs on. Those rows
+are read out of `ctx.registry` at mount — the fibers of the runtime named `tool-subagent`, and
+their `provider` / `toolName` config — which recovers the mapping without guessing.
+
+It is best-effort and the README says so: `toolName` is a deployment choice, a row may be composed
+after this plugin mounts, and a deployment may reach an external harness through a plugin this
+build has never heard of. `delegationTools` exists for those cases, and it may only **add** a name.
+A configured entry never displaces a discovered one, because repo-local configuration is
+attacker-controlled and re-pointing a discovered delegation tool at a benign provider would silence
+the loudest record this plugin emits — the same trust ranking as `CONVENTIONS.md` §5 and the same
+reasoning as §6 above.
+
+`spawn` and `fork` are deliberately not in the external-provider set. They run in process and are
+fully observed; grading them as unobserved boundaries would bury the two that are.
+
+## 23. MCP calls name their server, and nothing else about them changes
+
+MCP tools register as `mcp__<serverName>__<rawName>`, and every one of them used to fall through to
+API Activity as an opaque `tool:<name>`. The prefix is now split back apart: the server goes to
+`api.service.name` as `mcp:<server>` and to `unmapped.dsh.mcp_server`, the tool name to
+`unmapped.dsh.mcp_tool`. That is the whole change — which external MCP server an agent talked to is
+the largest supply-chain blind spot in the stack, and it is answerable from two names.
+
+The split is exact for the clean case and best-effort otherwise. The harness replaces characters
+outside `[A-Za-z0-9_-]` with `_` and, when that or the 64-character cap changes the name, appends a
+hash of the identity; a server namespace containing `__` after substitution is therefore ambiguous.
+The first `__` after the prefix is taken as the separator, because a namespace is a short
+deployment-chosen key and a tool name is not.
+
+Nothing about the arguments changes. The SOC lane carries two names and the same redacted argument
+list every other tool call gets.
+
+## 24. `cordis_define` and `cordis_run` are process activity
+
+Both were API Activity, which is what every unclassified tool gets. They compile and evaluate a
+plugin body inside the harness process, under the agent's own uid and with the agent's own service
+graph in reach; `tool-cordis`'s own README says to treat the toolset like bash access. Process
+Activity (1007) makes every process-based detection a SOC already owns fire on them, which is the
+entire point of the change.
+
+`cordis_define` does not itself evaluate anything, so `Launch` overstates that one call in
+isolation. Define-then-run is one capability and the pair is what a detection wants to see, so both
+are graded the same rather than splitting the pair across two classes and losing the join.
+`cordis_inspect_self` is read-only and stays an API call.
