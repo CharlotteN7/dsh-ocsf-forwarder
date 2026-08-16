@@ -45,9 +45,24 @@ has no runtime: add `@deepseek-ai/dsh-headless` (or another runnable bundle) alo
 the profile boots into a configuration with no agent loop and this plugin observes nothing.
 
 ```sh
-dsh plugin --profile <name> add @deepseek-ai/dsh-headless
+dsh plugin --profile <name> add @deepseek-ai/dsh-headless@0.1.0-rc.6
 dsh plugin --profile <name> add dsh-ocsf-forwarder
 dsh --profile <name> --dump-config      # verify the row is mounted
+```
+
+Pin `@deepseek-ai/dsh-headless` explicitly: its npm `latest` tag still points at
+`0.0.1-rc.1`, so an unpinned install silently resolves to a much older harness.
+
+**Install from the registry or a packed tarball, not from a git spec.**
+`dsh plugin add github:CharlotteN7/dsh-ocsf-forwarder` resolves and writes the
+dependency, but `lib/` is a build output that git does not carry and no
+`prepare` script rebuilds it, so the row mounts and then fails to load. To
+install from a checkout, build first and add the tarball:
+
+```sh
+git clone https://github.com/CharlotteN7/dsh-ocsf-forwarder && cd dsh-ocsf-forwarder
+pnpm install && pnpm run build && pnpm pack
+dsh plugin --profile <name> add ./dsh-ocsf-forwarder-0.1.0.tgz
 ```
 
 The bundle patch defaults the spool to `dshHomePath('ocsf/session.ocsf.jsonl')`. A profile patch

@@ -1,0 +1,81 @@
+name: Publish
+
+# Publishes on a pushed tag so the released artifact is always a named commit.
+# Tag with `npm version <patch|minor|major>` then `git push --follow-tags`.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and validate without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Lets npm record a provenance attestation linking the tarball to this run.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Publishing an unbuilt or untested package is how a broken release
+      # reaches users; the full gate runs again here rather than trusting CI.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Unit tests with coverage
+        run: pnpm run test:coverage
+
+      - name: publint
+        run: pnpm dlx publint --strict
+
+      # The tag must match the version being published, or the git history and
+      # the registry disagree about what a version contains.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package=$pkg"
+          [ "$tag" = "$pkg" ] || { echo "::error::tag $tag does not match package version $pkg"; exit 1; }
+
+      # A git-spec install gets no lib/ (it is gitignored and there is no
+      # prepare script), so the published tarball is the only working install
+      # path. Assert it carries every built module before it goes out.
+      - name: Every built module is in the tarball
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination /tmp > /dev/null
+          tarball="$(ls /tmp/*.tgz)"
+          built="$(find lib -name '*.js' | wc -l)"
+          shipped="$(tar tzf "$tarball" | grep -cE '^package/lib/.*\.js$')"
+          echo "built=$built shipped=$shipped"
+          [ "$built" -eq "$shipped" ] || { echo "::error::$built built, $shipped shipped"; exit 1; }
+
+      - name: Publish
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        run: pnpm publish --access public --no-git-checks --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: pnpm publish --access public --no-git-checks --dry-run

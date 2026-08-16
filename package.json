@@ -4,7 +4,6 @@
   "description": "Read-side SIEM forwarder for DeepSeek Harness: normalises session activity to OCSF and ships it",
   "license": "MIT",
   "author": "Ivan Tyshchenko <nsof@protonmail.com>",
-  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CharlotteN7/dsh-ocsf-forwarder.git"
