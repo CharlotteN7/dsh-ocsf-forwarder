@@ -29,6 +29,11 @@ jobs:
         node: ['22.19.0', '24']
     steps:
       - uses: actions/checkout@v4
+      # A path or hostname committed once stays retrievable through `git show`
+      # even after it leaves HEAD; only a history rewrite takes it back.
+      - name: No local paths or machine names
+        run: ./scripts/check-no-local-paths.sh --tree
+
       - run: corepack enable
       - uses: actions/setup-node@v4
         with:
