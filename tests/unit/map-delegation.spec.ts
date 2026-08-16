@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import { SessionState } from '../../src/correlate.ts'
-import { discoverDelegationTools, mergeDelegationTools, type RegistryLike } from '../../src/delegation.ts'
+import {
+  EXTERNAL_HARNESS_PROVIDERS,
+  discoverDelegationTools,
+  mergeDelegationTools,
+  type RegistryLike,
+} from '../../src/delegation.ts'
 import { mapEvent } from '../../src/map/index.ts'
 import { classifyTool, parseMcpToolName } from '../../src/map/tools.ts'
 import { CLASS, SEVERITY } from '../../src/ocsf/constants.ts'
@@ -153,6 +158,10 @@ describe('delegation discovery', () => {
     }
     return { values: () => runtimes.values() }
   }
+
+  it('counts only the providers that leave this session, so the in-process ones stay quiet', () => {
+    expect([...EXTERNAL_HARNESS_PROVIDERS].sort()).toEqual(['claude-code', 'codex'])
+  })
 
   it('finds the delegation tools whose provider leaves this session', () => {
     const discovered = discoverDelegationTools(registry([

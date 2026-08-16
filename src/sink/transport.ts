@@ -28,7 +28,7 @@ export type BatchOutcome =
   | 'reject'
 
 /** HTTP statuses that are transient despite being client errors. */
-export const RETRYABLE_CLIENT_STATUS: ReadonlySet<number> = new Set([408, 425, 429])
+const RETRYABLE_CLIENT_STATUS: ReadonlySet<number> = new Set([408, 425, 429])
 
 /**
  * The default status reading, shared by every HTTP transport: success is
