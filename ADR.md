@@ -36,18 +36,23 @@ event classes and no registered `ai` extension. AI support is the `ai_operation`
 `application`, and `iam` base events, so every class we emit inherits it. Verified against
 `https://schema.ocsf.io/api/1.9.0/{profiles,objects,classes}/…`.
 
-**Decision.** Emit standard classes with `metadata.profiles: ['ai_operation']`, mapping
-`ai_agent.instance_uid` to the session id, `ai_model` to the folded `request/context` route, and
-`delegation` to subagent lineage. Agent-loop semantics OCSF has no home for (turn, step, call id,
-log seq, tool class, phase, approval latency) go into one extension-owned object.
+**Decision.** Emit standard classes declaring every profile whose attributes the record carries —
+`ai_operation`, plus `cloud` and `osint` for the two stubs — mapping `ai_agent.instance_uid` to the
+session id, `ai_model` to the folded `request/context` route, and `delegation` to the child named by
+`tool-workflow/agent-start`. Agent-loop semantics OCSF has no home for (turn, step, call id, log
+seq, tool class, phase, approval latency) go into one extension-owned object.
 
-**Why not `unmapped`.** The OCSF FAQ is explicit: `unmapped` "is not recommended for event
-producers"; a native producer should extend the schema. `extension.placement: 'unmapped'` remains
-available for SIEMs whose validators reject unknown top-level attributes.
+**Why `unmapped` after all.** The OCSF FAQ prefers a registered extension for event producers, and
+that was the original choice. It is wrong here: every OCSF class is `additionalProperties: false`,
+so a top-level `dsh` key fails the published JSON Schema for every consumer that applies it — which
+is the readership an audit lane exists for. The extension object lives under `unmapped` by default,
+and `extension.placement: 'attribute'` is available to a deployment that has decided its own
+pipeline tolerates the top-level key.
 
-**Open point.** `extension.uid: 999` is OCSF's reserved development/private block. Correct for
-private deployment, wrong for interchange — a public release must apply for a registered uid, which
-is why both name and uid are configuration.
+**No uid is claimed.** 999 is not a free private block: the OCSF extension registry assigns it to
+the `Development` extension. `metadata.extensions` is therefore omitted until `extension.uid` names
+a uid the registry assigned this deployment. The singular `metadata.extension` has been deprecated
+since OCSF 1.1.0 and is not emitted at all.
 
 ## 3. Model requests map to API Activity, not HTTP Activity
 
@@ -107,8 +112,8 @@ short path or command is a rainbow-table lookup.
 
 ## 9. Coverage thresholds sit at the level actually reached
 
-`CONVENTIONS.md` §4 adopts 100% per-file coverage. The suite reaches 99.6% lines / 97.8% statements
-/ 97.5% functions / 79.8% branches, and the thresholds are pinned there so a regression fails. The
+`CONVENTIONS.md` §4 adopts 100% per-file coverage. The suite reaches 99.7% lines / 98.2% statements
+/ 97.9% functions / 86.1% branches; the thresholds are pinned below that so a regression fails. The
 residual branch gap is almost entirely the absent half of `field === undefined ? {} : { field }`
 spreads — the optional OCSF attributes — where the covering test would assert that an absent input
 field produces an absent output field. That is a real gap, stated rather than hidden.
@@ -135,3 +140,67 @@ executes when the model passes `sandbox_permissions` + `justification`. The head
 composes no answerer, so the ask fails closed to `unavailable`. That path exercises the real
 `ApprovalService`, the real audit pair, and produces the more interesting SOC signal: an agent asked
 to widen its sandbox and the deployment had no channel to answer.
+
+## 12. Rotation may stop; it may not delete an unacknowledged generation
+
+The first implementation renamed the full spool over a single `<spool>.1` and reopened. Combined
+with a shipper that only ever opened the live path, that made rotation a delete: the unshipped
+backlog moved aside, the shipper resumed on an empty file and reported healthy, and the next
+rotation overwrote it. Thirty records written, twenty-eight permanently gone.
+
+Rotation now writes fixed-width timestamped generations whose names are never reused, so
+lexicographic order is write order and no rotation can destroy one. The shipper drains generations
+oldest-first ahead of the live file and unlinks each only after every byte in it is acknowledged.
+
+The remaining question is what happens when generations accumulate faster than they drain. Deleting
+the oldest is the conventional answer and is the wrong one here: it reintroduces the original bug
+with more steps. Rotation stops at `spoolMaxGenerations` instead, the live file grows past
+`spoolMaxBytes`, and the plugin says why. An audit lane may run out of disk. It may not quietly
+delete the evidence it exists to keep.
+
+## 13. A spool path has one writer, enforced by a lock file
+
+Two `SpoolSink`s on one path each derive their size from their own `statSync` and rotate
+independently, so one process renames the inode the other holds an open descriptor to. The probe
+lost twelve of sixteen records with no corruption and nothing in any log.
+
+Node's `fs` exposes no `flock`, so ownership is an exclusive `<spool>.lock` created with `wx`
+holding the owner's pid. A second writer fails at load naming that pid — misconfiguration fails
+loud, and the operator's fix is one path per process. A lock whose pid no longer exists is taken
+over, so a crash does not need manual cleanup. `EPERM` from `process.kill(pid, 0)` counts as alive:
+the process exists under another uid.
+
+## 14. Refused batches are quarantined; unwell collectors are waited out
+
+A boolean "did the collector take it" cannot tell a collector that is down from a batch a collector
+will never accept, and treating both as retryable means one malformed record blocks delivery
+forever behind the cursor. `PostBatch` returns `accepted` / `retry` / `reject`. A 5xx, a timeout, a
+connection failure, and 408/425/429 are `retry`: the cursor holds and the shipper backs off
+exponentially from `flushIntervalMs` to `maxBackoffMs`. Any other 4xx is `reject`: the batch goes to
+`otlp.quarantinePath`, the cursor steps over it, and the operator is told. Quarantine is a
+deliberate, reported, recoverable loss of *delivery*; the records are still on disk.
+
+## 15. The forwarding cursor advances after the write, not before
+
+`observe()` advanced the per-session cursor and then wrote, so a sink that threw consumed the event:
+six records lost to a simulated `ENOSPC` and never retried when the disk recovered, with nothing but
+a `metadata.sequence` hole to show for it. The cursor now moves only after a record reaches the
+sink, and the walk stops at the first failure so the spool stays in log order. An outage becomes a
+delay. The counters that say which is happening are logged periodically and at unload, because
+`stats()` that nothing calls is not observability.
+
+## 16. Metadata is what the SOC lane carries verbatim, and metadata is a short list
+
+"No raw secret value reaches this lane" was true of the paths the design thought about and false on
+six it did not. The failure mode was the same each time: a field that looks like an identifier but
+is actually a rendering of the request. The first token of a command line is the executable — except
+in `SECRET=… cmd`, where it is the secret. A `grep` pattern looks like a path argument and is a
+search query. A provider `error.message` looks like a code and is a flattened error chain. An
+approval prompt, a hook `decision`, and a `JSON.parse` error message are all free text composed by
+something outside this plugin.
+
+The rule that replaces the assumption: the SOC lane carries verbatim only file paths, tool names,
+executable names, hostnames, URL scheme and host, and values drawn from a bounded enumeration this
+build owns. Everything else is `HMAC-SHA256(key, value)` plus a character count. `privacy.url`
+defaults to `host` for the same reason — a reset token rides in a path as readily as in a query
+string — and `sanitized` is now the deliberate widening rather than the default.
