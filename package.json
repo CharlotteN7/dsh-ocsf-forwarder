@@ -3,7 +3,28 @@
   "version": "0.1.0",
   "description": "Read-side SIEM forwarder for DeepSeek Harness: normalises session activity to OCSF and ships it",
   "license": "MIT",
+  "author": "Ivan Tyshchenko <nsof@protonmail.com>",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CharlotteN7/dsh-ocsf-forwarder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CharlotteN7/dsh-ocsf-forwarder/issues"
+  },
+  "homepage": "https://github.com/CharlotteN7/dsh-ocsf-forwarder#readme",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "ocsf",
+    "siem",
+    "otlp",
+    "audit-log",
+    "security"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
