@@ -76,6 +76,30 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # `--dry-run` never contacts the registry, so it cannot tell a working
+      # token from a missing one. Resolve the identity first, then rehearse.
+      - name: Registry authentication
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is empty or unset for this repository"
+            exit 1
+          fi
+          who="$(npm whoami --registry https://registry.npmjs.org/)"
+          echo "authenticated as: $who"
+          name="$(node -p "require('./package.json').name")"
+          # A name owned by someone else fails at publish, not here, so surface it now.
+          if npm view "$name" version --registry https://registry.npmjs.org/ 2>/dev/null; then
+            echo "note: $name already exists on the registry; publish will need a version bump"
+          else
+            echo "note: $name is unclaimed"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Dry run
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: pnpm publish --access public --no-git-checks --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
