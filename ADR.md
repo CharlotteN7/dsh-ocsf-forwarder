@@ -224,18 +224,18 @@ transport that decides delivery — and §18 records what that costs.
 
 ## 18. What was verified about Splunk HEC, and where our reading of it differs
 
-The HEC contract in `PLAN-0.2.md` came from research notes that `docs.splunk.com` had refused to
-serve. It was re-verified on 2026-08-16 against Splunk's live documentation, which now lives on
-`help.splunk.com`. Confirmed: `POST {base}/services/collector/event` ("which is where all
-JSON-formatted event requests must go"); `Authorization: Splunk <token>`, with the REST reference
-adding "The format is case-sensitive"; a batch is "event objects stacked one after the other";
-`time` is UNIX time "in the format `<sec>.<ms>`", so epoch **seconds**, not milliseconds.
+The HEC request format was verified on 2026-08-16 against Splunk's live documentation, which now
+lives on `help.splunk.com` after `docs.splunk.com` began redirecting. Confirmed:
+`POST {base}/services/collector/event` ("which is where all JSON-formatted event requests must
+go"); `Authorization: Splunk <token>`, with the REST reference adding "The format is
+case-sensitive"; a batch is "event objects stacked one after the other"; `time` is UNIX time "in
+the format `<sec>.<ms>`", so epoch **seconds**, not milliseconds.
 
-Two claims in the plan were wrong. Splunk states "Both concatenated JSON objects and JSON arrays
-like this are accepted", so an array is not rejected — the concatenation we emit is the documented
-form, not the only accepted one. And Splunk publishes **no** retryable status set; the widely
-copied 400/401/403-are-permanent rule is the OpenTelemetry Collector's `splunkhecexporter`, not
-Splunk's.
+Two widely repeated claims about HEC do not hold. Splunk states "Both concatenated JSON objects
+and JSON arrays like this are accepted", so an array is not rejected — the concatenation we emit
+is the documented form, not the only accepted one. And Splunk publishes **no** retryable status
+set; the widely copied 400/401/403-are-permanent rule is the OpenTelemetry Collector's
+`splunkhecexporter`, not Splunk's.
 
 Our reading therefore departs from that exporter on 401 and 403. Splunk's own error table maps
 both to token problems — "Token is required", "Invalid authorization", "Token disabled", "Invalid
