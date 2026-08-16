@@ -4,7 +4,7 @@ import { Forwarder, type ForwardableSession } from '../../src/forwarder.ts'
 import type { MappableEvent } from '../../src/map/index.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import type { Sink } from '../../src/sink/spool.ts'
-import { testConfig, testEnvironment } from './support.ts'
+import { dshOf, testConfig, testEnvironment } from './support.ts'
 import type { ResolvedConfig } from '../../src/config.ts'
 
 /** A sink that keeps every record it is handed. */
@@ -46,7 +46,7 @@ function forwarder(config: ResolvedConfig = testConfig()): { instance: Forwarder
 
 /** Event types of the records a sink collected. */
 function types(sink: MemorySink): string[] {
-  return sink.records.map(record => String((record['dsh'] as Record<string, unknown>)['event_type']))
+  return sink.records.map(record => String(dshOf(record)['event_type']))
 }
 
 describe('live forwarding', () => {
@@ -95,6 +95,78 @@ describe('live forwarding', () => {
     expect(errors).toHaveLength(1)
     expect(instance.stats().failed).toBe(1)
   })
+
+  it('retries an event the sink refused once the sink recovers', () => {
+    const config = testConfig()
+    const written: string[] = []
+    let full = true
+    const flaky: Sink = {
+      write(record) {
+        if (full) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+        written.push(String(record.metadata.uid))
+      },
+      close() {},
+    }
+    const instance = new Forwarder(testEnvironment(config), config, flaky, undefined, () => {})
+    const session = new FakeSession('s1', 0)
+    const events = Array.from({ length: 6 }, (_, index) =>
+      session.append('tool/call', { turn: 1, step: 0, callId: `c${String(index)}`, name: 'bash', arguments: '{"command":"id"}' }))
+    for (const event of events) instance.observe(session, event)
+    expect(written).toEqual([])
+
+    full = false
+    for (const event of events) instance.observe(session, event)
+    expect(written).toEqual(['s1:0', 's1:1', 's1:2', 's1:3', 's1:4', 's1:5'])
+  })
+
+  it('leaves the rest of a catch-up pending rather than stepping over it', () => {
+    const config = testConfig()
+    const written: string[] = []
+    let calls = 0
+    const oneBad: Sink = {
+      write(record) {
+        calls += 1
+        if (calls === 2) throw new Error('EIO')
+        written.push(String(record.metadata.uid))
+      },
+      close() {},
+    }
+    const instance = new Forwarder(testEnvironment(config), config, oneBad, undefined, () => {})
+    const session = new FakeSession('s1', 0)
+    for (let index = 0; index < 5; index += 1) session.append('step/start', { turn: 1, step: index })
+    const last = session.events[4] as MappableEvent
+
+    instance.observe(session, last)
+    expect(written).toEqual(['s1:0'])
+    // The failed event is still the cursor, so the rest arrive in log order.
+    instance.observe(session, last)
+    expect(written).toEqual(['s1:0', 's1:1', 's1:2', 's1:3', 's1:4'])
+  })
+
+  it('walks only the events it has not forwarded, not the whole log per append', () => {
+    const config = testConfig()
+    const sink = new MemorySink()
+    const instance = new Forwarder(testEnvironment(config), config, sink, undefined, () => {})
+    const session = new FakeSession('s1', 0)
+    const total = 500
+    for (let index = 0; index < total; index += 1) session.append('step/start', { turn: 1, step: index })
+
+    // A quadratic catch-up reads roughly n²/2 elements out of the log; a
+    // cursor-based one reads each element once.
+    const appended = [...session.events]
+    let reads = 0
+    const counted = new Proxy(session.events, {
+      get(target, property, receiver): unknown {
+        if (typeof property === 'string' && /^\d+$/.test(property)) reads += 1
+        return Reflect.get(target, property, receiver) as unknown
+      },
+    })
+    Object.defineProperty(session, 'events', { get: () => counted })
+
+    for (const event of appended) instance.observe(session, event)
+    expect(sink.records).toHaveLength(total)
+    expect(reads).toBeLessThan(total * 4)
+  })
 })
 
 describe('seed replay', () => {
@@ -115,7 +187,7 @@ describe('seed replay', () => {
     instance.observe(session, session.append('turn/start', { turn: 2 }))
 
     expect(types(sink)).toEqual(['turn/start', 'tool/call', 'turn/end', 'turn/start'])
-    const replayed = sink.records.map(record => (record['dsh'] as Record<string, unknown>)['replayed'])
+    const replayed = sink.records.map(record => dshOf(record)['replayed'])
     expect(replayed).toEqual([true, true, true, false])
     expect(sink.records[0]?.metadata.uid).toBe('s2:0')
   })
@@ -128,8 +200,8 @@ describe('seed replay', () => {
 
     expect(types(sink)).toEqual(['session/adopted', 'turn/start'])
     const marker = sink.records[0] as OcsfRecord
-    expect((marker['dsh'] as Record<string, unknown>)['seed_events']).toBe(4)
-    expect((marker['dsh'] as Record<string, unknown>)['forked_from']).toBe('parent-1')
+    expect(dshOf(marker)['seed_events']).toBe(4)
+    expect(dshOf(marker)['forked_from']).toBe('parent-1')
     expect(marker.metadata.uid).toBe('s2:adopted:4')
   })
 
@@ -139,6 +211,16 @@ describe('seed replay', () => {
     instance.adopt(session)
     instance.observe(session, session.append('turn/start', { turn: 2 }))
     expect(types(sink)).toEqual(['turn/start'])
+  })
+
+  it('contains a failure while adopting rather than failing the session store', () => {
+    const config = testConfig({ seedReplay: 'boundary' })
+    const errors: unknown[] = []
+    const failing: Sink = { write() { throw new Error('disk full') }, close() {} }
+    const instance = new Forwarder(testEnvironment(config), config, failing, undefined, error => errors.push(error))
+    expect(() => { instance.adopt(resumed()) }).not.toThrow()
+    expect(errors).toHaveLength(1)
+    expect(instance.stats().failed).toBe(1)
   })
 
   it('adopts a session only once', () => {
@@ -153,7 +235,7 @@ describe('seed replay', () => {
     const { instance, sink } = forwarder()
     const session = new FakeSession('child', 0, { parentSession: 'parent-1', seedLength: 2, agentPreset: 'review', cwd: '/srv/app' })
     instance.observe(session, session.append('turn/start', { turn: 1 }))
-    const attributes = sink.records[0]?.['dsh'] as Record<string, unknown>
+    const attributes = dshOf(sink.records[0] as OcsfRecord)
     expect(attributes['parent_session_id']).toBe('parent-1')
     expect(attributes['seed_length']).toBe(2)
     expect(attributes['agent_preset']).toBe('review')
@@ -178,10 +260,25 @@ describe('disposal', () => {
     instance.observe(session, session.append('approval/asked', { id: 'a9', toolName: 'bash' }))
     instance.dispose(session)
 
-    const unresolved = sink.records.filter(record => (record['dsh'] as Record<string, unknown>)['unresolved'] === true)
+    const unresolved = sink.records.filter(record => dshOf(record)['unresolved'] === true)
     expect(unresolved).toHaveLength(2)
     expect(unresolved[0]?.metadata.uid).toBe('s1:unresolved:c9')
     expect(unresolved[1]?.metadata.uid).toBe('s1:unresolved:approval:a9')
+  })
+
+  it('measures an abandoned call against the log clock, not the wall clock', () => {
+    const { instance, sink } = forwarder()
+    const session = new FakeSession('s1', 0)
+    // A resumed session replays events appended long before this process ran.
+    const replayTime = Date.now() - 72 * 3_600_000
+    instance.observe(session, session.append('tool/call', {
+      turn: 1, step: 0, callId: 'c9', name: 'bash', arguments: '{"command":"sleep 900"}',
+    }, replayTime))
+    instance.observe(session, session.append('turn/end', { turn: 1, reason: { kind: 'completed' } }, replayTime + 250))
+    instance.dispose(session)
+
+    const unresolved = sink.records.find(record => dshOf(record)['unresolved'] === true)
+    expect(unresolved?.duration).toBe(250)
   })
 })
 

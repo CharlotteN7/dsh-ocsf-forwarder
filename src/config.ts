@@ -54,6 +54,14 @@ export interface Config {
   spoolPath: string
   /** Rotate the spool once it reaches this many bytes. */
   spoolMaxBytes?: number
+  /**
+   * How many rotated generations may await the shipper. Rotation stops at this
+   * count and the live file grows past `spoolMaxBytes` rather than a
+   * generation being deleted unshipped.
+   */
+  spoolMaxGenerations?: number
+  /** How often the forwarder logs its counters. `0` turns the report off. */
+  statsIntervalMs?: number
   /** Restricted lane: full event payloads, written only when acknowledged. */
   restricted?: {
     /** Absolute path of the restricted spool; the file is created with mode 0600. */
@@ -75,6 +83,12 @@ export interface Config {
     timeoutMs?: number
     /** Path of the durable byte cursor; defaults to `<spoolPath>.cursor`. */
     cursorPath?: string
+    /** Largest spool region read into memory in one pass. */
+    maxReadBytes?: number
+    /** Ceiling of the exponential backoff applied after a transient failure. */
+    maxBackoffMs?: number
+    /** Where batches the collector refuses on content are set aside; defaults to `<spoolPath>.quarantine`. */
+    quarantinePath?: string
   }
   /** Redaction policy for the SOC lane. */
   privacy?: {
@@ -97,10 +111,14 @@ export interface Config {
   includeEventTypes?: string[]
   /** Additional tool names classified as a process, file, http, or api activity. */
   toolClasses?: Record<string, ConfigurableToolClass>
-  /** Identity written into `metadata.extension`; the attributes object uses `name` as its key. */
+  /** Identity written into `metadata.extensions[]`; the attributes object uses `name` as its key. */
   extension?: {
     name?: string
-    /** OCSF extension uid. 999 is the reserved development block. */
+    /**
+     * OCSF extension uid, as assigned by the OCSF extension registry. There is
+     * no default: `metadata.extensions` is omitted until a deployment has an
+     * assigned uid, because every unassigned value collides with somebody.
+     */
     uid?: number
     placement?: ExtensionPlacement
   }
@@ -108,10 +126,39 @@ export interface Config {
   vendorName?: string
 }
 
+/** Rotation threshold of the SOC-lane spool. */
+const DEFAULT_SPOOL_MAX_BYTES = 256 * 1024 * 1024
+
+/** Rotated generations kept before rotation stops and the live file grows instead. */
+const DEFAULT_SPOOL_MAX_GENERATIONS = 16
+
+/** How often the forwarder's counters reach the log. */
+const DEFAULT_STATS_INTERVAL_MS = 300_000
+
+/** Records per OTLP POST. */
+const DEFAULT_BATCH_SIZE = 256
+
+/** How often the shipper drains the spool. */
+const DEFAULT_FLUSH_INTERVAL_MS = 5_000
+
+/** Per-request timeout of one OTLP POST. */
+const DEFAULT_TIMEOUT_MS = 10_000
+
+/** Largest spool region the shipper reads into memory in one pass. */
+const DEFAULT_MAX_READ_BYTES = 8 * 1024 * 1024
+
+/** Ceiling of the shipper's exponential backoff. */
+const DEFAULT_MAX_BACKOFF_MS = 300_000
+
+/** Vendor reported in `metadata.product.vendor_name`. */
+const DEFAULT_VENDOR_NAME = 'dsh-security-plugins'
+
 /** Schemastery validator for {@link Config}. */
 export const Config: z<Config> = z.object({
   spoolPath: z.string().required(),
-  spoolMaxBytes: z.number().default(256 * 1024 * 1024),
+  spoolMaxBytes: z.number().default(DEFAULT_SPOOL_MAX_BYTES),
+  spoolMaxGenerations: z.number().default(DEFAULT_SPOOL_MAX_GENERATIONS),
+  statsIntervalMs: z.number().default(DEFAULT_STATS_INTERVAL_MS),
   restricted: z.object({
     path: z.string(),
     acknowledged: z.boolean().default(false),
@@ -119,15 +166,20 @@ export const Config: z<Config> = z.object({
   otlp: z.object({
     endpoint: z.string(),
     headers: z.dict(z.string()).default({}),
-    batchSize: z.number().default(256),
-    flushIntervalMs: z.number().default(5000),
-    timeoutMs: z.number().default(10_000),
+    batchSize: z.number().default(DEFAULT_BATCH_SIZE),
+    flushIntervalMs: z.number().default(DEFAULT_FLUSH_INTERVAL_MS),
+    timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
     cursorPath: z.string(),
+    maxReadBytes: z.number().default(DEFAULT_MAX_READ_BYTES),
+    maxBackoffMs: z.number().default(DEFAULT_MAX_BACKOFF_MS),
+    quarantinePath: z.string(),
   }),
   privacy: z.object({
     argumentValues: z.union(['omit', 'digest', 'full'] as const).default('digest'),
     commandLine: z.union(['digest', 'full'] as const).default('digest'),
-    url: z.union(['host', 'sanitized', 'full'] as const).default('sanitized'),
+    // `sanitized` keeps the path, and a path is where a reset or invite token
+    // rides as often as a query string does.
+    url: z.union(['host', 'sanitized', 'full'] as const).default('host'),
     hmacKey: z.object({
       source: z.union(['ephemeral', 'env', 'literal'] as const).default('ephemeral'),
       variable: z.string(),
@@ -140,10 +192,13 @@ export const Config: z<Config> = z.object({
   toolClasses: z.dict(z.union(CONFIGURABLE_TOOL_CLASSES)).default({}),
   extension: z.object({
     name: z.string().default('dsh'),
-    uid: z.number().default(999),
-    placement: z.union(['attribute', 'unmapped'] as const).default('attribute'),
+    uid: z.number(),
+    // Every OCSF class is `additionalProperties: false`, so a top-level
+    // extension key makes the record fail validation. `unmapped` is the slot
+    // the schema provides for exactly this.
+    placement: z.union(['attribute', 'unmapped'] as const).default('unmapped'),
   }),
-  vendorName: z.string().default('deepseek-harness-security-plugins'),
+  vendorName: z.string().default(DEFAULT_VENDOR_NAME),
 })
 
 /** Event types never forwarded unless `includeEventTypes` names them. */
@@ -166,6 +221,8 @@ export const DEFAULT_DROPPED_EVENT_TYPES: readonly string[] = [
 export interface ResolvedConfig {
   readonly spoolPath: string
   readonly spoolMaxBytes: number
+  readonly spoolMaxGenerations: number
+  readonly statsIntervalMs: number
   readonly restrictedPath: string | undefined
   readonly otlp: ResolvedOtlp | undefined
   readonly argumentValues: ArgumentPolicy
@@ -176,7 +233,8 @@ export interface ResolvedConfig {
   readonly forwarded: (eventType: string) => boolean
   readonly toolClasses: Readonly<Record<string, ConfigurableToolClass>>
   readonly extensionName: string
-  readonly extensionUid: number
+  /** Absent until a deployment configures a uid the OCSF registry assigned it. */
+  readonly extensionUid: number | undefined
   readonly extensionPlacement: ExtensionPlacement
   readonly vendorName: string
 }
@@ -189,6 +247,9 @@ export interface ResolvedOtlp {
   readonly flushIntervalMs: number
   readonly timeoutMs: number
   readonly cursorPath: string
+  readonly maxReadBytes: number
+  readonly maxBackoffMs: number
+  readonly quarantinePath: string
 }
 
 /** Minimum accepted length of a configured HMAC key, in bytes. */
@@ -259,10 +320,13 @@ function resolveOtlp(config: Config): ResolvedOtlp | undefined {
   return {
     url: target,
     headers: { ...config.otlp?.headers },
-    batchSize: config.otlp?.batchSize ?? 256,
-    flushIntervalMs: config.otlp?.flushIntervalMs ?? 5000,
-    timeoutMs: config.otlp?.timeoutMs ?? 10_000,
+    batchSize: config.otlp?.batchSize ?? DEFAULT_BATCH_SIZE,
+    flushIntervalMs: config.otlp?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
+    timeoutMs: config.otlp?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     cursorPath: config.otlp?.cursorPath ?? `${config.spoolPath}.cursor`,
+    maxReadBytes: config.otlp?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES,
+    maxBackoffMs: config.otlp?.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
+    quarantinePath: config.otlp?.quarantinePath ?? `${config.spoolPath}.quarantine`,
   }
 }
 
@@ -278,19 +342,21 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
   for (const type of config.includeEventTypes ?? []) dropped.delete(type)
   return {
     spoolPath: config.spoolPath,
-    spoolMaxBytes: config.spoolMaxBytes ?? 256 * 1024 * 1024,
+    spoolMaxBytes: config.spoolMaxBytes ?? DEFAULT_SPOOL_MAX_BYTES,
+    spoolMaxGenerations: config.spoolMaxGenerations ?? DEFAULT_SPOOL_MAX_GENERATIONS,
+    statsIntervalMs: config.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS,
     restrictedPath: resolveRestrictedPath(config),
     otlp: resolveOtlp(config),
     argumentValues: config.privacy?.argumentValues ?? 'digest',
     commandLine: config.privacy?.commandLine ?? 'digest',
-    url: config.privacy?.url ?? 'sanitized',
+    url: config.privacy?.url ?? 'host',
     hmacKey: resolveHmacKey(config, env),
     seedReplay: config.seedReplay ?? 'full',
     forwarded: (eventType: string): boolean => !dropped.has(eventType),
     toolClasses: { ...config.toolClasses },
     extensionName: config.extension?.name ?? 'dsh',
-    extensionUid: config.extension?.uid ?? 999,
-    extensionPlacement: config.extension?.placement ?? 'attribute',
-    vendorName: config.vendorName ?? 'deepseek-harness-security-plugins',
+    extensionUid: config.extension?.uid,
+    extensionPlacement: config.extension?.placement ?? 'unmapped',
+    vendorName: config.vendorName ?? DEFAULT_VENDOR_NAME,
   }
 }

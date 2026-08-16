@@ -72,12 +72,14 @@ export function mapTurnStart(
  * @param sessionId - the session the event belongs to.
  * @param event - the event's `time` and payload.
  * @param state - the session's correlation state.
+ * @param config - the resolved configuration, for the failure-message digest.
  * @returns the record mapping.
  */
 export function mapTurnEnd(
   sessionId: string,
   event: { time: number; data: unknown },
   state: SessionState,
+  config: ResolvedConfig,
 ): EventMapping {
   const turn = readNumber(event.data, 'turn') ?? 0
   const reason = readNested(event.data, 'reason')
@@ -88,6 +90,11 @@ export function mapTurnEnd(
   const started = state.closeTurn(turn)
   const failure = readNested(reason, 'error')
   const cancelCause = readString(readNested(reason, 'reason'), 'kind')
+  // A provider failure message is a flattened error chain: URLs, request ids,
+  // file paths, and whatever the far end echoed back of the request. Only its
+  // code is a bounded value, so the text is reduced to a digest that still
+  // groups repeat failures.
+  const failureText = failure === undefined ? undefined : summariseText(String(failure['message'] ?? ''), config)
   return {
     classUid: CLASS.apiActivity,
     activityId: ACTIVITY.api.create,
@@ -103,9 +110,10 @@ export function mapTurnEnd(
       phase: 'end',
       end_reason: kind,
       ...cancelCause === undefined ? {} : { cancel_cause: cancelCause },
-      ...failure === undefined ? {} : {
+      ...failure === undefined || failureText === undefined ? {} : {
         error_code: String(failure['code'] ?? 'UNKNOWN'),
-        error_message: String(failure['message'] ?? ''),
+        error_message_digest: failureText.digest,
+        error_message_length: failureText.length,
       },
     },
   }
@@ -322,17 +330,36 @@ export function mapHookInvoked(sessionId: string, event: { data: unknown }): Eve
 }
 
 /**
+ * Blocking decisions the hook protocol defines. `hook/result.decision` is
+ * typed `string` because it is folded from hook-authored JSON, so anything
+ * outside this set is recorded as `other` rather than copied.
+ */
+const HOOK_DECISIONS: ReadonlySet<string> = new Set(['approve', 'allow', 'block', 'deny', 'ask'])
+
+/** One hook decision reduced to the protocol's vocabulary. */
+function hookDecision(reported: string | undefined): string {
+  if (reported === undefined) return 'unknown'
+  return HOOK_DECISIONS.has(reported) ? reported : 'other'
+}
+
+/**
  * Map `hook/result`: the paired hook outcome.
  * @param sessionId - the session the event belongs to.
  * @param event - the event's payload.
+ * @param config - the resolved configuration, for the decision digest.
  * @returns the record mapping.
  */
-export function mapHookResult(sessionId: string, event: { data: unknown }): EventMapping {
+export function mapHookResult(sessionId: string, event: { data: unknown }, config: ResolvedConfig): EventMapping {
   const handlerId = readString(event.data, 'handlerId') ?? 'unknown'
   const point = readString(event.data, 'point') ?? 'unknown'
-  const decision = readString(event.data, 'decision') ?? 'unknown'
+  const reported = readString(event.data, 'decision')
+  const decision = hookDecision(reported)
   const exitCode = readNumber(event.data, 'exitCode')
-  const failed = decision === 'deny' || decision === 'stop' || (exitCode !== undefined && exitCode !== 0)
+  const failed = decision === 'deny' || decision === 'block' || (exitCode !== undefined && exitCode !== 0)
+  // A hook that reports what it found — a DLP hook naming the secret it
+  // matched, for instance — writes that finding into `decision`, which the
+  // protocol types as a free string.
+  const detail = reported === undefined || decision !== 'other' ? undefined : summariseText(reported, config)
   return {
     classUid: CLASS.processActivity,
     activityId: ACTIVITY.process.terminate,
@@ -349,19 +376,26 @@ export function mapHookResult(sessionId: string, event: { data: unknown }): Even
       decision,
       turn: readNumber(event.data, 'turn') ?? 0,
       phase: 'result',
+      ...detail === undefined ? {} : { decision_digest: detail.digest, decision_length: detail.length },
     },
   }
 }
 
 /**
- * Map `subagent/descriptor`: a child agent was established under this session's
- * authority.
- * @param sessionId - the session the event belongs to.
- * @param event - the event's `time` and payload.
+ * Map `subagent/descriptor`: this session is itself a child agent, established
+ * under another session's authority.
+ *
+ * The descriptor is appended to the child's own log and names no session id;
+ * the record's own `session_id` is the child, and `dsh.parent_session_id`
+ * carries the lineage. `tool-workflow/agent-start` is where a parent names its
+ * children, so that is where {@link mapWorkflow} builds the delegation link.
+ * @param sessionId - the session the event belongs to, which is the child.
+ * @param event - the event's payload.
  * @returns the record mapping.
  */
-export function mapSubagentDescriptor(sessionId: string, event: { time: number; data: unknown }): EventMapping {
-  const childId = readString(event.data, 'sessionId') ?? readString(event.data, 'childSession') ?? sessionId
+export function mapSubagentDescriptor(sessionId: string, event: { data: unknown }): EventMapping {
+  const mode = readString(event.data, 'mode') ?? 'unknown'
+  const provider = readString(event.data, 'provider') ?? 'unknown'
   return {
     classUid: CLASS.applicationLifecycle,
     activityId: ACTIVITY.applicationLifecycle.start,
@@ -369,13 +403,13 @@ export function mapSubagentDescriptor(sessionId: string, event: { time: number; 
     // its own tools under the parent's authority.
     severityId: SEVERITY.low,
     statusId: STATUS.success,
-    message: 'subagent established',
-    correlationUid: `${sessionId}:subagent:${childId}`,
-    delegation: { uid: childId, parent_uid: sessionId, created_time: event.time },
+    message: `subagent established (${mode})`,
+    correlationUid: `${sessionId}:subagent`,
     attributes: {
-      child_session_id: childId,
+      subagent_mode: mode,
+      subagent_provider: provider,
       phase: 'start',
-      ...readString(event.data, 'kind') === undefined ? {} : { kind: readString(event.data, 'kind') as string },
+      ...readNumber(event.data, 'version') === undefined ? {} : { descriptor_version: readNumber(event.data, 'version') as number },
     },
   }
 }
@@ -395,20 +429,31 @@ const WORKFLOW_ACTIVITIES: Readonly<Record<string, number>> = Object.freeze({
  * @param event - the event's payload.
  * @returns the record mapping.
  */
-export function mapWorkflow(eventType: string, sessionId: string, event: { data: unknown }): EventMapping {
+export function mapWorkflow(
+  eventType: string,
+  sessionId: string,
+  event: { time: number; data: unknown },
+): EventMapping {
   const runId = readString(event.data, 'runId') ?? 'unknown'
-  const reason = readString(event.data, 'reason') ?? readString(event.data, 'outcome')
+  // A run settles with `stopReason`, a member with `outcome`; neither is
+  // called `reason`, so reading that name graded every aborted run a success.
+  const reason = readString(event.data, 'stopReason') ?? readString(event.data, 'outcome')
+  const childId = readString(event.data, 'childId')
+  const member = readNumber(event.data, 'seq')
   return {
     classUid: CLASS.applicationLifecycle,
     activityId: WORKFLOW_ACTIVITIES[eventType] ?? ACTIVITY.applicationLifecycle.update,
-    severityId: SEVERITY.informational,
+    severityId: reason !== undefined && reason !== 'completed' ? SEVERITY.low : SEVERITY.informational,
     statusId: reason === undefined || reason === 'completed' ? STATUS.success : STATUS.failure,
     ...reason === undefined ? {} : { statusDetail: reason },
     message: eventType,
     correlationUid: `${sessionId}:workflow:${runId}`,
+    ...childId === undefined ? {} : { delegation: { uid: childId, parent_uid: sessionId, created_time: event.time } },
     attributes: {
       run_id: runId,
       event: eventType,
+      ...member === undefined ? {} : { member_seq: member },
+      ...childId === undefined ? {} : { child_session_id: childId },
       ...readString(event.data, 'name') === undefined ? {} : { name: readString(event.data, 'name') as string },
     },
   }
@@ -429,12 +474,19 @@ export function mapCompaction(
   event: { data: unknown },
   config: ResolvedConfig,
 ): EventMapping {
-  const compactionId = readString(event.data, 'compactionId') ?? 'unknown'
+  const compactionId = readString(event.data, 'compactionId')
   const error = readString(event.data, 'error')
   const shadowed = readNested(event.data, 'shadowedRange')
   const summary = eventType === 'compaction/summary'
     ? summariseText(JSON.stringify(readRecord(event.data)?.['summary'] ?? ''), config)
     : undefined
+  // `compaction/prune` carries no compaction id — it is a standalone shadow
+  // price, identified by the surface range it replaced.
+  const correlationUid = compactionId !== undefined
+    ? `${sessionId}:compaction:${compactionId}`
+    : shadowed === undefined
+      ? undefined
+      : `${sessionId}:compaction:range:${String(shadowed['start'] ?? 0)}-${String(shadowed['end'] ?? 0)}`
   return {
     classUid: CLASS.apiActivity,
     activityId: eventType === 'compaction/prune' ? ACTIVITY.api.delete : ACTIVITY.api.update,
@@ -442,10 +494,10 @@ export function mapCompaction(
     statusId: error === undefined ? STATUS.success : STATUS.failure,
     ...error === undefined ? {} : { statusDetail: error },
     message: eventType,
-    correlationUid: `${sessionId}:compaction:${compactionId}`,
+    ...correlationUid === undefined ? {} : { correlationUid },
     api: { operation: eventType },
     attributes: {
-      compaction_id: compactionId,
+      ...compactionId === undefined ? {} : { compaction_id: compactionId },
       event: eventType,
       ...readNumber(event.data, 'shadowedTokenCount') === undefined ? {} : { shadowed_tokens: readNumber(event.data, 'shadowedTokenCount') as number },
       ...readArrayLength(event.data, 'shadowedSeqs') === undefined ? {} : { shadowed_count: readArrayLength(event.data, 'shadowedSeqs') as number },
@@ -455,6 +507,14 @@ export function mapCompaction(
   }
 }
 
+/** The Scheduled Job activity each durable `ScheduleChange.operation` records. */
+const SCHEDULE_ACTIVITIES: Readonly<Record<string, number>> = Object.freeze({
+  create: ACTIVITY.scheduledJob.create,
+  delete: ACTIVITY.scheduledJob.delete,
+  // A dispatch advances the record's durable state rather than removing it.
+  dispatch: ACTIVITY.scheduledJob.update,
+})
+
 /**
  * Map `schedule/change` onto Scheduled Job Activity.
  * @param sessionId - the session the event belongs to.
@@ -462,21 +522,21 @@ export function mapCompaction(
  * @returns the record mapping.
  */
 export function mapScheduleChange(sessionId: string, event: { data: unknown }): EventMapping {
-  const kind = readString(event.data, 'kind') ?? readString(event.data, 'op') ?? 'unknown'
-  const id = readString(event.data, 'id') ?? readString(event.data, 'scheduleId') ?? 'unknown'
-  const activityId = kind.includes('remove') || kind.includes('delete')
-    ? ACTIVITY.scheduledJob.delete
-    : kind.includes('create') || kind.includes('add') ? ACTIVITY.scheduledJob.create : ACTIVITY.scheduledJob.update
+  // `ScheduleChange` is a strict discriminated union on `operation`; a create
+  // names its record under `schedule`, the other two carry a bare `id`.
+  const operation = readString(event.data, 'operation') ?? 'unknown'
+  const id = readString(readNested(event.data, 'schedule'), 'id') ?? readString(event.data, 'id') ?? 'unknown'
+  const activityId = SCHEDULE_ACTIVITIES[operation] ?? ACTIVITY.scheduledJob.other
   return {
     classUid: CLASS.scheduledJobActivity,
     activityId,
     severityId: SEVERITY.low,
     statusId: STATUS.success,
-    statusDetail: kind,
-    message: `schedule ${kind}`,
+    statusDetail: operation,
+    message: `schedule ${operation}`,
     correlationUid: `${sessionId}:schedule:${id}`,
     job: { name: id, uid: id },
-    attributes: { schedule_id: id, change_kind: kind },
+    attributes: { schedule_id: id, operation },
   }
 }
 

@@ -110,4 +110,33 @@ describe('resolution', () => {
   it('leaves the shipper off when no endpoint is configured', () => {
     expect(resolveConfig(minimal).otlp).toBeUndefined()
   })
+
+  it('derives the quarantine path and bounds the read window and the backoff', () => {
+    const resolved = resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318' } })
+    expect(resolved.otlp?.quarantinePath).toBe('/var/log/dsh/ocsf.jsonl.quarantine')
+    expect(resolved.otlp?.maxReadBytes).toBeGreaterThan(0)
+    expect(resolved.otlp?.maxBackoffMs).toBeGreaterThan(resolved.otlp?.flushIntervalMs ?? 0)
+  })
+
+  it('withholds a URL path by default, because a token rides there as readily as in a query', () => {
+    expect(resolveConfig(minimal).url).toBe('host')
+  })
+
+  it('keeps the extension attributes out of the class namespace by default', () => {
+    expect(resolveConfig(minimal).extensionPlacement).toBe('unmapped')
+  })
+
+  it('claims no OCSF extension uid until a deployment supplies a registered one', () => {
+    expect(resolveConfig(minimal).extensionUid).toBeUndefined()
+    expect(resolveConfig({ ...minimal, extension: { uid: 4242 } }).extensionUid).toBe(4242)
+  })
+
+  it('names a vendor rather than whatever directory the plugin was built in', () => {
+    expect(resolveConfig(minimal).vendorName).toBe('dsh-security-plugins')
+  })
+
+  it('bounds the rotated generations that may await the shipper', () => {
+    expect(resolveConfig(minimal).spoolMaxGenerations).toBeGreaterThan(1)
+    expect(resolveConfig({ ...minimal, spoolMaxGenerations: 3 }).spoolMaxGenerations).toBe(3)
+  })
 })

@@ -6,7 +6,7 @@ import { mapUnresolvedCall } from '../../src/map/tool-events.ts'
 import { classifyTool, parseArguments } from '../../src/map/tools.ts'
 import { CLASS, SEVERITY, STATUS, typeUid } from '../../src/ocsf/constants.ts'
 import { buildRecord } from '../../src/ocsf/record.ts'
-import { testConfig, testEnvironment } from './support.ts'
+import { dshOf, testConfig, testEnvironment } from './support.ts'
 
 const SESSION = 'session-1'
 
@@ -62,6 +62,14 @@ describe('argument parsing', () => {
     expect(parseArguments('[1,2]').error).toBe('tool arguments are not a JSON object')
     expect(parseArguments('{"a":1}').record).toEqual({ a: 1 })
   })
+
+  it('states only that parsing failed, never a window of the text that failed', () => {
+    const malformed = '{"command": curl -u admin:hunter2 https://x}'
+    expect(parseArguments(malformed).error).toBe('tool arguments are not valid JSON')
+    expect(parseArguments(malformed).error).not.toContain('hunter2')
+    expect(parseArguments('{"command": "export AWS_KEY=wJalrXUtnFEMIK').error).not.toContain('wJalr')
+    expect(parseArguments('sorry, I meant to run: psql -W hunter2').error).not.toContain('psql')
+  })
 })
 
 describe('tool/call mapping', () => {
@@ -84,7 +92,7 @@ describe('tool/call mapping', () => {
     expect(mapping?.file?.name).toBe('.env')
   })
 
-  it('maps a web_fetch call onto HTTP Activity with a sanitised URL', () => {
+  it('maps a web_fetch call onto HTTP Activity with a redacted URL', () => {
     const mapping = mapEvent(
       SESSION,
       call('web_fetch', { url: 'https://example.test/data?token=secret#frag' }),
@@ -92,7 +100,31 @@ describe('tool/call mapping', () => {
       testConfig(),
     )
     expect(mapping?.classUid).toBe(CLASS.httpActivity)
-    expect(mapping?.httpRequest?.url?.url_string).toBe('https://example.test/data')
+    expect(mapping?.httpRequest?.url?.url_string).toBe('https://example.test')
+  })
+
+  it('names the executable of a command that begins with an environment assignment', () => {
+    const mapping = mapEvent(
+      SESSION,
+      call('bash', { command: 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG aws s3 cp x s3://b' }),
+      new SessionState(),
+      testConfig(),
+    )
+    expect(mapping?.process?.name).toBe('aws')
+    expect(JSON.stringify(mapping)).not.toContain('wJalrXUtnFEMIK7MDENG')
+  })
+
+  it('treats a grep pattern as a query to digest, never as a file path', () => {
+    const mapping = mapEvent(
+      SESSION,
+      call('grep', { pattern: 'password\\s*=\\s*"hunter2"' }),
+      new SessionState(),
+      testConfig(),
+    )
+    expect(mapping?.classUid).toBe(CLASS.fileSystemActivity)
+    expect(mapping?.file?.path).toBeUndefined()
+    expect(mapping?.observables ?? []).toEqual([])
+    expect(JSON.stringify(mapping)).not.toContain('hunter2')
   })
 
   it('maps an unknown tool onto API Activity naming the operation', () => {
@@ -150,6 +182,31 @@ describe('tool/result correlation', () => {
     expect(mapping?.duration).toBeUndefined()
   })
 
+  it('carries the subject object its OCSF class requires on the settling record too', () => {
+    const config = testConfig()
+    const state = new SessionState()
+    mapEvent(SESSION, call('bash', { command: 'ls -la /etc' }), state, config)
+    expect(mapEvent(SESSION, result('call-1', false), state, config)?.process?.name).toBe('ls')
+
+    mapEvent(SESSION, call('read', { file_path: '/srv/app/.env' }), state, config)
+    expect(mapEvent(SESSION, result('call-1', false), state, config)?.file?.path).toBe('/srv/app/.env')
+
+    mapEvent(SESSION, call('web_fetch', { url: 'https://example.test/a' }), state, config)
+    expect(mapEvent(SESSION, result('call-1', false), state, config)?.httpRequest?.http_method).toBe('GET')
+  })
+
+  it('still names a subject when the settling record has no call to draw one from', () => {
+    const config = testConfig()
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch',
+      seq: 6,
+      time: 2_050,
+      data: { subCallId: 'lost', name: 'write', isError: false },
+    }, new SessionState(), config)
+    expect(mapping?.classUid).toBe(CLASS.fileSystemActivity)
+    expect(mapping?.file?.name).toBe('write')
+  })
+
   it('does not let two sessions share a call id', () => {
     const config = testConfig()
     const first = new SessionState()
@@ -188,15 +245,24 @@ describe('unresolved calls', () => {
   it('flushes a call that never settled with an unknown status', () => {
     const mapping = mapUnresolvedCall(SESSION, {
       callId: 'call-9', name: 'bash', toolClass: 'process-launch', time: 10, seq: 3, turn: 1, step: 0,
+      process: { name: 'sleep' },
     }, 60)
     expect(mapping.statusId).toBe(STATUS.unknown)
     expect(mapping.duration).toBe(50)
     expect(mapping.attributes?.['unresolved']).toBe(true)
+    expect(mapping.process?.name).toBe('sleep')
+  })
+
+  it('names a subject even for a call whose arguments yielded none', () => {
+    const mapping = mapUnresolvedCall(SESSION, {
+      callId: 'call-9', name: 'read', toolClass: 'file-read', time: 10, seq: 3, turn: 1, step: 0,
+    }, 60)
+    expect(mapping.file?.name).toBe('read')
   })
 })
 
 describe('the composed record', () => {
-  it('carries the OCSF identity, the ai_operation profile, and the extension object', () => {
+  it('carries the OCSF identity, its declared profiles, and the extension object', () => {
     const config = testConfig()
     const env = testEnvironment(config)
     const state = new SessionState()
@@ -215,26 +281,52 @@ describe('the composed record', () => {
     expect(record.category_uid).toBe(1)
     expect(record.type_uid).toBe(typeUid(CLASS.processActivity, 1))
     expect(record.metadata.version).toBe('1.9.0')
-    expect(record.metadata.profiles).toEqual(['ai_operation'])
     expect(record.metadata.uid).toBe(`${SESSION}:1`)
-    expect(record.metadata.extension).toEqual({ name: 'dsh', uid: 999, version: '0.1.0-test' })
     expect(record.ai_agent?.instance_uid).toBe(SESSION)
     expect(record.ai_agent?.ai_model?.name).toBe('deepseek-chat')
     expect(record.cloud).toEqual({ provider: 'Other' })
     expect(record.osint).toEqual([])
-    const attributes = record['dsh'] as Record<string, unknown>
+    const attributes = dshOf(record)
     expect(attributes['session_id']).toBe(SESSION)
     expect(attributes['event_type']).toBe('tool/call')
     expect(attributes['call_id']).toBe('call-1')
   })
 
-  it('moves the extension object under unmapped when the deployment asks', () => {
-    const config = testConfig({ extension: { placement: 'unmapped' } })
-    const env = testEnvironment(config)
-    const mapping = mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), config)
-    const record = buildRecord(env, { sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false }, mapping!)
+  it('declares every profile whose attributes it carries', () => {
+    const record = buildRecord(testEnvironment(), {
+      sessionId: SESSION, seq: 1, time: 1, eventType: 'turn/start', replayed: false,
+    }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), testConfig())!)
+    expect(record.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
+  })
+
+  it('keeps the extension attributes out of the class namespace by default', () => {
+    const record = buildRecord(testEnvironment(), {
+      sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false,
+    }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), testConfig())!)
     expect(record['dsh']).toBeUndefined()
     expect((record.unmapped as Record<string, unknown>)['dsh']).toBeDefined()
+  })
+
+  it('names an extension only once a deployment supplies a registered uid', () => {
+    const plain = buildRecord(testEnvironment(), {
+      sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false,
+    }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), testConfig())!)
+    expect(plain.metadata.extensions).toBeUndefined()
+
+    const config = testConfig({ extension: { uid: 4242 } })
+    const registered = buildRecord(testEnvironment(config), {
+      sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false,
+    }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), config)!)
+    expect(registered.metadata.extensions).toEqual([{ name: 'dsh', uid: 4242, version: '0.1.0-test' }])
+  })
+
+  it('places the extension object at the top level when the deployment asks', () => {
+    const config = testConfig({ extension: { placement: 'attribute' } })
+    const record = buildRecord(testEnvironment(config), {
+      sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false,
+    }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), config)!)
+    expect(record['dsh']).toBeDefined()
+    expect(record.unmapped).toBeUndefined()
   })
 
   it('honours a synthetic idempotency key', () => {
@@ -245,6 +337,6 @@ describe('the composed record', () => {
       callId: 'c', name: 'bash', toolClass: 'process-launch', time: 0, seq: 1, turn: 0, step: 0,
     }, 5))
     expect(record.metadata.uid).toBe('custom')
-    expect((record['dsh'] as Record<string, unknown>)['replayed']).toBe(true)
+    expect(dshOf(record)['replayed']).toBe(true)
   })
 })

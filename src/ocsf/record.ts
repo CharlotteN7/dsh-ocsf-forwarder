@@ -13,6 +13,7 @@ import type { ResolvedConfig } from '../config.ts'
 import {
   AI_AGENT_TYPE_NATIVE,
   CATEGORY_OF_CLASS,
+  CLASS,
   OCSF_VERSION,
   USER_TYPE_USER,
   type ClassUid,
@@ -30,6 +31,7 @@ import type {
   OcsfHttpRequest,
   OcsfJob,
   OcsfMessageContext,
+  OcsfNetworkEndpoint,
   OcsfObservable,
   OcsfProcess,
   OcsfRecord,
@@ -42,6 +44,9 @@ export const DSH_ATTRIBUTES_VERSION = 1
 /** Name reported as the agent runtime in `ai_agent.name`. */
 const AGENT_NAME = 'deepseek-harness'
 
+/** Profiles every record declares, one per profile-owned attribute it carries. */
+const RECORD_PROFILES: readonly string[] = Object.freeze(['ai_operation', 'cloud', 'osint'])
+
 /** Per-process identity shared by every record. */
 export interface RecordEnvironment {
   readonly config: ResolvedConfig
@@ -50,6 +55,8 @@ export interface RecordEnvironment {
   readonly device: OcsfDevice
   readonly actor: OcsfActor
   readonly user: OcsfUser
+  /** `src_endpoint` of the API Activity records; the host the agent runs on. */
+  readonly srcEndpoint: OcsfNetworkEndpoint
   /** Injectable so tests get deterministic `metadata.logged_time`. */
   readonly now: () => number
 }
@@ -67,13 +74,15 @@ export function createEnvironment(
   now: () => number = Date.now,
 ): RecordEnvironment {
   const user: OcsfUser = { name: userInfo().username, type_id: USER_TYPE_USER }
+  const host = hostname()
   return {
     config,
     productName: 'dsh-ocsf-forwarder',
     productVersion,
-    device: { type_id: 0, hostname: hostname(), os: { name: platform(), type_id: 0 } },
+    device: { type_id: 0, hostname: host, os: { name: platform(), type_id: 0 } },
     actor: { process: { pid: process.pid, name: 'dsh' }, user },
     user,
+    srcEndpoint: { hostname: host, svc_name: AGENT_NAME },
     now,
   }
 }
@@ -172,12 +181,18 @@ export function buildRecord(
         version: env.productVersion,
       },
       version: OCSF_VERSION,
-      profiles: ['ai_operation'],
-      extension: {
+      // `cloud` and `osint` are declared because the record carries those
+      // objects; under `additionalProperties: false` an undeclared profile's
+      // attribute is exactly the validation failure it was meant to avoid.
+      profiles: RECORD_PROFILES,
+      // `metadata.extension` is deprecated since 1.9.0's 1.1.0 predecessor.
+      // The list is omitted entirely until a deployment supplies a uid the
+      // OCSF registry assigned it.
+      extensions: config.extensionUid === undefined ? undefined : [{
         name: config.extensionName,
         uid: config.extensionUid,
         version: env.productVersion,
-      },
+      }],
       log_provider: AGENT_NAME,
       log_name: 'session',
       uid: subject.uid ?? `${subject.sessionId}:${subject.seq}`,
@@ -185,10 +200,13 @@ export function buildRecord(
       sequence: subject.seq,
       logged_time: env.now(),
     }),
-    // Required by every class this plugin emits and meaningless for a host
-    // agent; emitted so records validate rather than silently fail ingestion.
+    // Required by the declared `cloud` and `osint` profiles and meaningless for
+    // a host agent; emitted so records validate rather than fail ingestion.
     cloud: { provider: 'Other' },
     osint: [],
+    // API Activity requires a source endpoint. Other classes do not define the
+    // attribute, and every class is `additionalProperties: false`.
+    src_endpoint: mapping.classUid === CLASS.apiActivity ? env.srcEndpoint : undefined,
     ai_agent: compact({
       name: AGENT_NAME,
       type_id: AI_AGENT_TYPE_NATIVE,

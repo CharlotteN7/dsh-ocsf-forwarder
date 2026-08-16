@@ -26,7 +26,16 @@ describe('approval/asked', () => {
     expect(mapping?.privileges).toEqual(['tool:bash'])
     expect(mapping?.correlationUid).toBe(`${SESSION}:approval:a-1`)
     expect(mapping?.attributes?.['call_id']).toBe('call-7')
-    expect(mapping?.attributes?.['reason']).toBe('escalate sandbox')
+    expect(String(mapping?.attributes?.['reason_digest'])).toMatch(/^hmac-sha256:/)
+    expect(mapping?.attributes?.['reason_length']).toBe('escalate sandbox'.length)
+  })
+
+  it('digests the prompt text, which quotes the command being approved', () => {
+    const prompt = 'run `psql -h db -U admin -W hunter2 -c "select * from users"`'
+    const mapping = mapEvent(SESSION, asked('a-1', 5_000, { reason: prompt }), new SessionState(), config)
+    expect(JSON.stringify(mapping)).not.toContain('hunter2')
+    expect(mapping?.attributes?.['reason']).toBeUndefined()
+    expect(mapping?.attributes?.['reason_length']).toBe(prompt.length)
   })
 
   it('reports a payload with no request id', () => {

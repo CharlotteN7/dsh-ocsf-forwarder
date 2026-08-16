@@ -35,11 +35,12 @@ const PLUGIN_MANIFEST = JSON.parse(
 const PLUGIN_PACKAGE = PLUGIN_MANIFEST.name
 
 /**
- * Harness checkout used to launch the agent. Point `DSH_REPO` at a checkout
- * whose `pnpm run build:lib:host` has run at least once; without those Typert
- * host artifacts profile boot fails with module-resolution errors.
+ * Harness checkout used to launch the agent, defaulting to `../dsh` beside
+ * this repository. Point `DSH_REPO` at a checkout whose
+ * `pnpm run build:lib:host` has run at least once; without those Typert host
+ * artifacts profile boot fails with module-resolution errors.
  */
-const DSH_REPO = process.env.DSH_REPO ?? '/path/to/workspace/dsh'
+const DSH_REPO = process.env.DSH_REPO ?? fileURLToPath(new URL('../../../dsh', import.meta.url))
 
 /**
  * Which `dsh` entry the agent boots from. `src` runs `apps/cli/src/bin.ts`
@@ -114,7 +115,17 @@ export interface OcsfLine extends Record<string, unknown> {
   readonly class_uid: number
   readonly activity_id: number
   readonly metadata: Record<string, unknown> & { readonly uid?: string; readonly correlation_uid?: string }
-  readonly dsh: Record<string, unknown>
+  /** The extension attributes, under the `unmapped` slot the schema provides. */
+  readonly unmapped: { readonly dsh: Record<string, unknown> }
+}
+
+/**
+ * The extension-owned attributes of one spooled record.
+ * @param record - the record read back from the spool.
+ * @returns the `dsh` attribute object.
+ */
+export function dshOf(record: OcsfLine): Record<string, unknown> {
+  return record.unmapped.dsh
 }
 
 /** Recursively collect every file under `dir`; missing directories yield nothing. */

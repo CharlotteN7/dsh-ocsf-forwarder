@@ -95,8 +95,11 @@ export function parseArguments(raw: string): ParsedArguments {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch (error: unknown) {
-    return { error: error instanceof Error ? error.message : 'invalid JSON' }
+  } catch {
+    // The parser's own message quotes a window of the offending text, which
+    // for a malformed tool call is the raw model output — the one thing this
+    // lane may not carry. Only the fact of the failure is recorded.
+    return { error: 'tool arguments are not valid JSON' }
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { error: 'tool arguments are not a JSON object' }
@@ -160,7 +163,10 @@ export function toolDetails(
   }
 
   if (toolClass === 'file-read' || toolClass === 'file-write' || toolClass === 'file-update') {
-    const path = stringArg(args.record, 'file_path') ?? stringArg(args.record, 'path') ?? stringArg(args.record, 'pattern')
+    // `pattern` is deliberately not a path fallback: a search expression is a
+    // query the model composed, not a location, and it routinely contains the
+    // very value it is hunting for.
+    const path = stringArg(args.record, 'file_path') ?? stringArg(args.record, 'path')
     if (path !== undefined) observables.push({ name: 'file.path', type_id: OBSERVABLE.filePath, value: path })
     return {
       // A path is the security signal, not a secret, so it is emitted verbatim.

@@ -80,6 +80,19 @@ describe('command lines', () => {
     expect(commandName('  /usr/bin/env python x.py')).toBe('/usr/bin/env')
     expect(commandName('   ')).toBeUndefined()
   })
+
+  it('names the executable behind inline environment assignments, not the assignment', () => {
+    expect(commandName('AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG aws s3 cp x s3://b')).toBe('aws')
+    expect(commandName('GITHUB_TOKEN=ghp_ZZZZ gh pr create')).toBe('gh')
+    expect(commandName('A=1 B=2 /usr/bin/psql')).toBe('/usr/bin/psql')
+    expect(commandName('PASSWORD="hunter 2" psql')).toBe('psql')
+    expect(commandName("PASSWORD='hunter 2' psql")).toBe('psql')
+  })
+
+  it('discloses nothing when the leading token still carries a value', () => {
+    expect(commandName('SECRET=hunter2')).toBeUndefined()
+    expect(commandName('9BAD=hunter2 ls')).toBeUndefined()
+  })
 })
 
 describe('URLs', () => {
@@ -87,6 +100,11 @@ describe('URLs', () => {
     expect(redactUrl('https://api.test/v1/data?token=sk-1#frag', 'sanitized')).toBe('https://api.test/v1/data')
     expect(redactUrl('https://api.test/v1/data?token=sk-1', 'host')).toBe('https://api.test')
     expect(redactUrl('https://api.test/v1/data?token=sk-1', 'full')).toContain('token=sk-1')
+  })
+
+  it('drops a path-embedded token under the default policy', () => {
+    expect(redactUrl('https://api.test/v1/reset/sk-live-SUPERSECRET?q=1', testConfig().url))
+      .toBe('https://api.test')
   })
 
   it('discloses nothing for a value that is not a URL', () => {

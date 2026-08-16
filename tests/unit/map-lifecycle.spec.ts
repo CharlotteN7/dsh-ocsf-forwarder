@@ -52,6 +52,24 @@ describe('turns', () => {
     const failed = mapEvent(SESSION, event('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: 'slow down' } } }), new SessionState(), config)
     expect(failed?.attributes?.['error_code']).toBe('RATE_LIMIT')
   })
+
+  it('digests a provider failure message rather than copying the error chain', () => {
+    const mapping = mapEvent(SESSION, event('turn/end', {
+      turn: 1,
+      reason: { kind: 'error', error: { code: 'PROVIDER_ERROR', message: 'upstream 401 for key sk-live-SUPERSECRET' } },
+    }), new SessionState(), config)
+    expect(JSON.stringify(mapping)).not.toContain('sk-live-SUPERSECRET')
+    expect(String(mapping?.attributes?.['error_message_digest'])).toMatch(/^hmac-sha256:/)
+    expect(mapping?.attributes?.['error_message_length']).toBe('upstream 401 for key sk-live-SUPERSECRET'.length)
+  })
+
+  it('groups repeat failures by digesting the same message identically', () => {
+    const grade = (message: string): unknown => mapEvent(SESSION, event('turn/end', {
+      turn: 1, reason: { kind: 'error', error: { code: 'E', message } },
+    }), new SessionState(), config)?.attributes?.['error_message_digest']
+    expect(grade('boom')).toBe(grade('boom'))
+    expect(grade('boom')).not.toBe(grade('bang'))
+  })
 })
 
 describe('steps and model calls', () => {
@@ -124,20 +142,65 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
     expect(result?.process?.exit_code).toBe(2)
   })
 
-  it('maps a subagent descriptor onto the delegation object', () => {
-    const mapping = mapEvent(SESSION, event('subagent/descriptor', { sessionId: 'child-1', kind: 'continuable' }, 7_000), new SessionState(), config)
-    expect(mapping?.delegation).toEqual({ uid: 'child-1', parent_uid: SESSION, created_time: 7_000 })
+  it('reduces a hook decision to the protocol vocabulary', () => {
+    const decide = (decision: string): Record<string, unknown> | undefined =>
+      mapEvent(SESSION, event('hook/result', { turn: 1, point: 'PreToolUse', handlerId: 'h1', decision, exitCode: 0 }), new SessionState(), config)
+        ?.attributes as Record<string, unknown> | undefined
+    expect(decide('deny')?.['decision']).toBe('deny')
+    expect(decide('allow')?.['decision']).toBe('allow')
+    expect(decide('ask')?.['decision']).toBe('ask')
+  })
+
+  it('never copies a hook-authored finding out of the decision field', () => {
+    const mapping = mapEvent(SESSION, event('hook/result', {
+      turn: 1, point: 'PreToolUse', handlerId: 'h1',
+      decision: 'deny: token ghp_AAAABBBBCCCC found in staged diff', exitCode: 2, durationMs: 12,
+    }), new SessionState(), config)
+    expect(JSON.stringify(mapping)).not.toContain('ghp_AAAABBBBCCCC')
+    expect(mapping?.attributes?.['decision']).toBe('other')
+    expect(mapping?.statusDetail).toBe('other')
+    expect(String(mapping?.attributes?.['decision_digest'])).toMatch(/^hmac-sha256:/)
+    expect(mapping?.statusId).toBe(STATUS.failure)
+  })
+
+  it('describes the child agent this session is, without inventing a child id', () => {
+    const mapping = mapEvent(SESSION, event('subagent/descriptor', {
+      version: 2, mode: 'continuable', provider: 'task', label: 'audit the repo',
+    }, 7_000), new SessionState(), config)
+    expect(mapping?.delegation).toBeUndefined()
+    expect(mapping?.attributes?.['subagent_mode']).toBe('continuable')
+    expect(mapping?.attributes?.['subagent_provider']).toBe('task')
+    expect(mapping?.attributes?.['descriptor_version']).toBe(2)
+    expect(JSON.stringify(mapping)).not.toContain('audit the repo')
   })
 
   it('maps workflow brackets onto application lifecycle', () => {
     const start = mapEvent(SESSION, event('tool-workflow/run-start', { runId: 'r1', name: 'review' }), new SessionState(), config)
     expect(start?.activityId).toBe(ACTIVITY.applicationLifecycle.start)
-    const end = mapEvent(SESSION, event('tool-workflow/run-end', { runId: 'r1', reason: 'aborted' }), new SessionState(), config)
+    const end = mapEvent(SESSION, event('tool-workflow/run-end', { runId: 'r1', stopReason: 'completed' }), new SessionState(), config)
     expect(end?.activityId).toBe(ACTIVITY.applicationLifecycle.stop)
-    expect(end?.statusId).toBe(STATUS.failure)
+    expect(end?.statusId).toBe(STATUS.success)
   })
 
-  it('records a prune as history deletion', () => {
+  it('grades an aborted workflow run a failure, reading the reason the harness emits', () => {
+    const end = mapEvent(SESSION, event('tool-workflow/run-end', { runId: 'wf1', stopReason: 'aborted' }), new SessionState(), config)
+    expect(end?.statusId).toBe(STATUS.failure)
+    expect(end?.statusDetail).toBe('aborted')
+
+    const member = mapEvent(SESSION, event('tool-workflow/agent-end', { runId: 'wf1', seq: 0, outcome: 'failed' }), new SessionState(), config)
+    expect(member?.statusId).toBe(STATUS.failure)
+    expect(member?.attributes?.['member_seq']).toBe(0)
+  })
+
+  it('links a workflow member to its published child session', () => {
+    const mapping = mapEvent(SESSION, event('tool-workflow/agent-start', {
+      runId: 'wf1', seq: 0, label: 'reviewer', childId: 'CHILD1',
+    }, 7_000), new SessionState(), config)
+    expect(mapping?.delegation).toEqual({ uid: 'CHILD1', parent_uid: SESSION, created_time: 7_000 })
+    expect(mapping?.attributes?.['child_session_id']).toBe('CHILD1')
+  })
+
+  it('records a prune as history deletion, identified by the range it replaced', () => {
     const mapping = mapEvent(SESSION, event('compaction/prune', {
       shadowedRange: { start: 4, end: 9 }, shadowedSeqs: [4, 5, 6], shadowedTokenCount: 900,
     }), new SessionState(), config)
@@ -145,6 +208,8 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
     expect(mapping?.attributes?.['shadowed_tokens']).toBe(900)
     expect(mapping?.attributes?.['shadowed_count']).toBe(3)
     expect(mapping?.attributes?.['shadowed_start']).toBe(4)
+    expect(mapping?.attributes?.['compaction_id']).toBeUndefined()
+    expect(mapping?.correlationUid).toBe(`${SESSION}:compaction:range:4-9`)
   })
 
   it('digests a compaction summary instead of carrying it', () => {
@@ -161,15 +226,26 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
     expect(mapping?.statusDetail).toBe('model refused')
   })
 
-  it('maps a schedule change onto Scheduled Job Activity', () => {
-    const created = mapEvent(SESSION, event('schedule/change', { kind: 'create', id: 's1' }), new SessionState(), config)
+  it('maps a schedule change onto Scheduled Job Activity, reading the durable payload', () => {
+    const created = mapEvent(SESSION, event('schedule/change', {
+      version: 1, operation: 'create', schedule: { id: 'sch_1', kind: 'every', prompt: 'nightly deploy' },
+    }), new SessionState(), config)
     expect(created?.classUid).toBe(CLASS.scheduledJobActivity)
     expect(created?.activityId).toBe(ACTIVITY.scheduledJob.create)
-    expect(created?.job).toEqual({ name: 's1', uid: 's1' })
-    const removed = mapEvent(SESSION, event('schedule/change', { kind: 'remove', id: 's1' }), new SessionState(), config)
-    expect(removed?.activityId).toBe(ACTIVITY.scheduledJob.delete)
-    const changed = mapEvent(SESSION, event('schedule/change', { kind: 'reschedule', id: 's1' }), new SessionState(), config)
-    expect(changed?.activityId).toBe(ACTIVITY.scheduledJob.update)
+    expect(created?.job).toEqual({ name: 'sch_1', uid: 'sch_1' })
+    expect(created?.attributes?.['operation']).toBe('create')
+    expect(JSON.stringify(created)).not.toContain('nightly deploy')
+
+    const deleted = mapEvent(SESSION, event('schedule/change', { version: 1, operation: 'delete', id: 'sch_1' }), new SessionState(), config)
+    expect(deleted?.activityId).toBe(ACTIVITY.scheduledJob.delete)
+
+    const dispatched = mapEvent(SESSION, event('schedule/change', {
+      version: 1, operation: 'dispatch', id: 'sch_1', acceptedAt: '2026-01-01',
+    }), new SessionState(), config)
+    expect(dispatched?.activityId).toBe(ACTIVITY.scheduledJob.update)
+
+    const unknown = mapEvent(SESSION, event('schedule/change', { version: 1, operation: 'merged-later' }), new SessionState(), config)
+    expect(unknown?.activityId).toBe(ACTIVITY.scheduledJob.other)
   })
 })
 

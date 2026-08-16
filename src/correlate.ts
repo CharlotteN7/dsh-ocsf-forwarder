@@ -8,10 +8,17 @@
  * @module correlate
  */
 
-import type { OcsfAiModel } from './ocsf/types.ts'
+import type { OcsfAiModel, OcsfFile, OcsfHttpRequest, OcsfProcess } from './ocsf/types.ts'
 import type { ToolClass } from './map/tools.ts'
 
-/** One tool call awaiting its result. */
+/**
+ * One tool call awaiting its result.
+ *
+ * The class-specific object built from the call's arguments is kept here
+ * because the result event has none: OCSF requires `process` on every Process
+ * Activity record and `file` on every File System Activity record, including
+ * the one that reports the call settling.
+ */
 export interface PendingCall {
   readonly callId: string
   readonly name: string
@@ -20,6 +27,9 @@ export interface PendingCall {
   readonly seq: number
   readonly turn: number
   readonly step: number
+  readonly process?: OcsfProcess
+  readonly file?: OcsfFile
+  readonly httpRequest?: OcsfHttpRequest
 }
 
 /** One approval question awaiting its decision. */
@@ -39,6 +49,19 @@ export interface PendingApproval {
 export class SessionState {
   /** Next log seq this forwarder has not yet emitted. */
   cursor = 0
+  /**
+   * Position in `session.events` the catch-up walk resumes from. Scanning the
+   * log from index 0 on every append is quadratic in the session's length, and
+   * that walk runs synchronously on the agent-loop hot path.
+   */
+  index = 0
+  /**
+   * Append time of the last event forwarded for this session, used instead of
+   * the wall clock when an unresolved pair is flushed: a resumed session
+   * replays log times from hours ago, and `Date.now()` against them reports
+   * durations in days.
+   */
+  lastEventTime: number | undefined
   /** The session's current model route, folded from `request/context`. */
   aiModel: OcsfAiModel | undefined
   /** Set once the session's seed has been handled. */

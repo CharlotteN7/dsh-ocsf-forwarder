@@ -104,14 +104,27 @@ export function redactCommandLine(command: string, policy: CommandLinePolicy, ke
 }
 
 /**
+ * Leading `NAME=VALUE` assignments of a command line, with quoted values.
+ *
+ * `SECRET=… cmd` is the ordinary way to hand a credential to one process, so
+ * the first whitespace-delimited token of a command line is a secret at least
+ * as often as it is an executable.
+ */
+const LEADING_ASSIGNMENTS = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/
+
+/**
  * The executable name of a command, which is metadata rather than content and
  * is safe in every lane.
  * @param command - the verbatim command.
- * @returns the first whitespace-delimited token, or `undefined` when empty.
+ * @returns the executable token, or `undefined` when the command is empty or
+ *   its leading token still carries a value.
  */
 export function commandName(command: string): string | undefined {
-  const [first] = command.trim().split(/\s+/, 1)
-  return first === undefined || first.length === 0 ? undefined : first
+  const [first] = command.replace(LEADING_ASSIGNMENTS, '').trim().split(/\s+/, 1)
+  if (first === undefined || first.length === 0) return undefined
+  // An executable path never contains `=`; anything that does is a value the
+  // assignment strip did not recognise, so it is withheld rather than guessed.
+  return first.includes('=') ? undefined : first
 }
 
 /**

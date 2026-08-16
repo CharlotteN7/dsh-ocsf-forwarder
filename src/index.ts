@@ -66,10 +66,23 @@ export function apply(ctx: Context, config: Config): void {
     ctx.logger.warn(`ocsf-forwarder: ${error instanceof Error ? error.message : String(error)}`)
   }
 
-  const soc = new SpoolSink({ path: resolved.spoolPath, maxBytes: resolved.spoolMaxBytes, mode: SOC_SPOOL_MODE })
+  const warn = (message: string): void => { ctx.logger.warn(`ocsf-forwarder: ${message}`) }
+  const soc = new SpoolSink({
+    path: resolved.spoolPath,
+    maxBytes: resolved.spoolMaxBytes,
+    maxGenerations: resolved.spoolMaxGenerations,
+    mode: SOC_SPOOL_MODE,
+    onWarn: warn,
+  })
   const restricted = resolved.restrictedPath === undefined
     ? undefined
-    : new SpoolSink({ path: resolved.restrictedPath, maxBytes: resolved.spoolMaxBytes, mode: RESTRICTED_SPOOL_MODE })
+    : new SpoolSink({
+      path: resolved.restrictedPath,
+      maxBytes: resolved.spoolMaxBytes,
+      maxGenerations: resolved.spoolMaxGenerations,
+      mode: RESTRICTED_SPOOL_MODE,
+      onWarn: warn,
+    })
   const sinks: Sink[] = restricted === undefined ? [soc] : [soc, restricted]
   const closing = new FanOutSink(sinks, report)
 
@@ -98,9 +111,26 @@ export function apply(ctx: Context, config: Config): void {
     forwarder.adopt(session)
   }
 
+  // Counters nobody reads are counters nobody acts on: a forwarder that has
+  // been failing every write since mount looks exactly like an idle one until
+  // this line appears in the log.
+  const reportStats = (): void => {
+    const stats = forwarder.stats()
+    ctx.logger.info(
+      `ocsf-forwarder: forwarded=${String(stats.forwarded)} dropped=${String(stats.dropped)} `
+      + `unreadable=${String(stats.unreadable)} failed=${String(stats.failed)}`,
+    )
+  }
+  const statsTimer = resolved.statsIntervalMs > 0
+    ? setInterval(reportStats, resolved.statsIntervalMs)
+    : undefined
+  statsTimer?.unref()
+
   ctx.effect(() => async () => {
+    if (statsTimer !== undefined) clearInterval(statsTimer)
     shipper?.stop()
     if (shipper !== undefined) await shipper.drain()
     closing.close()
+    reportStats()
   }, 'ocsf forwarder')
 }

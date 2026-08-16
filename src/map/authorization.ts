@@ -10,9 +10,11 @@
  * @module map/authorization
  */
 
+import type { ResolvedConfig } from '../config.ts'
 import type { SessionState } from '../correlate.ts'
 import { ACTIVITY, CLASS, SEVERITY, STATUS } from '../ocsf/constants.ts'
 import type { EventMapping } from '../ocsf/record.ts'
+import { summariseText } from '../privacy.ts'
 import { readString } from '../read.ts'
 
 /** The correlation id joining an approval question to its decision. */
@@ -35,17 +37,24 @@ const OUTCOMES: Readonly<Record<string, { statusId: number; severityId: number }
  * @param sessionId - the session the event belongs to.
  * @param event - the event's `seq`, `time`, and payload.
  * @param state - the session's correlation state.
+ * @param config - the resolved configuration, for the prompt digest.
  * @returns the record mapping, or `undefined` when the payload has no request id.
  */
 export function mapApprovalAsked(
   sessionId: string,
   event: { seq: number; time: number; data: unknown },
   state: SessionState,
+  config: ResolvedConfig,
 ): EventMapping | undefined {
   const id = readString(event.data, 'id')
   if (id === undefined) return undefined
   const toolName = readString(event.data, 'toolName') ?? 'unknown'
   const callId = readString(event.data, 'callId')
+  // An approval prompt explains itself by quoting the action being approved —
+  // the command, the path, the URL — so it is a rendering of the request, not
+  // a label for it.
+  const askedReason = readString(event.data, 'reason')
+  const reason = askedReason === undefined ? undefined : summariseText(askedReason, config)
   state.openApproval({ id, toolName, time: event.time, seq: event.seq, ...callId === undefined ? {} : { callId } })
   return {
     classUid: CLASS.authorizeSession,
@@ -60,7 +69,7 @@ export function mapApprovalAsked(
       tool: toolName,
       phase: 'asked',
       ...callId === undefined ? {} : { call_id: callId },
-      ...readString(event.data, 'reason') === undefined ? {} : { reason: readString(event.data, 'reason') as string },
+      ...reason === undefined ? {} : { reason_digest: reason.digest, reason_length: reason.length },
     },
   }
 }

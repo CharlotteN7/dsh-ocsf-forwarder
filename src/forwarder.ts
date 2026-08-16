@@ -108,13 +108,7 @@ export class Forwarder {
    */
   observe(session: ForwardableSession, event: MappableEvent): void {
     this.contain(() => {
-      const state = this.stateOf(session)
-      for (const pending of session.events) {
-        if (pending.seq < state.cursor) continue
-        if (pending.seq > event.seq) break
-        state.cursor = pending.seq + 1
-        this.forward(session, state, pending)
-      }
+      this.catchUp(session, this.stateOf(session), event.seq)
     })
   }
 
@@ -127,12 +121,10 @@ export class Forwarder {
   dispose(session: ForwardableSession): void {
     this.contain(() => {
       const state = this.stateOf(session)
-      for (const pending of session.events) {
-        if (pending.seq < state.cursor) continue
-        state.cursor = pending.seq + 1
-        this.forward(session, state, pending)
-      }
-      const time = Date.now()
+      this.catchUp(session, state, Number.POSITIVE_INFINITY)
+      // Log time, not wall time: a resumed session's events carry the times
+      // they were originally appended.
+      const time = state.lastEventTime ?? Date.now()
       const { calls, approvals } = state.drain()
       for (const call of calls) {
         this.deliver(session, state, {
@@ -153,6 +145,41 @@ export class Forwarder {
         }, mapUnresolvedApproval(session.id, approval, time), undefined)
       }
     })
+  }
+
+  /**
+   * Forward every event from the session cursor up to `throughSeq`.
+   *
+   * The cursor advances only after an event's record reaches the sink, so a
+   * sink that throws — a full disk, a revoked permission — leaves the event
+   * pending instead of consuming it. The walk stops at the first failure and
+   * the next observation retries from exactly there, which keeps the spool in
+   * log order and turns an outage into a delay rather than a hole.
+   * @param session - the session whose log is being drained.
+   * @param state - that session's forwarding state.
+   * @param throughSeq - the last `seq` to forward in this pass.
+   */
+  private catchUp(session: ForwardableSession, state: SessionState, throughSeq: number): void {
+    // Read once: the accessor materialises a frozen copy of the whole log.
+    const events = session.events
+    while (state.index < events.length) {
+      const pending = events[state.index]
+      if (pending === undefined || pending.seq > throughSeq) return
+      if (pending.seq < state.cursor) {
+        state.index += 1
+        continue
+      }
+      try {
+        this.forward(session, state, pending)
+      } catch (error: unknown) {
+        this.failed += 1
+        this.onError(error)
+        return
+      }
+      state.cursor = pending.seq + 1
+      state.lastEventTime = pending.time
+      state.index += 1
+    }
   }
 
   /** Map and deliver one event, honouring the drop policy. */

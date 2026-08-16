@@ -36,6 +36,36 @@ function apiOf(toolClass: ToolClass, toolName: string): { operation: string } | 
 }
 
 /**
+ * The class-required object a settled or abandoned call carries.
+ *
+ * Every OCSF class this plugin emits requires its own subject object on every
+ * record of that class, so a `tool/result` needs the `process`, `file`, or
+ * `http_request` its `tool/call` built. The call's object is reused when the
+ * pair is intact; a result whose call was never observed still gets a
+ * name-only object, because a record missing it is not a valid record.
+ * @param toolClass - the tool's class.
+ * @param name - the tool name.
+ * @param call - the paired call, when it was observed.
+ * @returns the `process`, `file`, or `httpRequest` field for the mapping.
+ */
+function subjectOf(
+  toolClass: ToolClass,
+  name: string,
+  call: PendingCall | undefined,
+): Pick<EventMapping, 'process' | 'file' | 'httpRequest'> {
+  if (toolClass === 'process-launch' || toolClass === 'process-terminate') {
+    return { process: call?.process ?? { name } }
+  }
+  if (toolClass === 'file-read' || toolClass === 'file-write' || toolClass === 'file-update') {
+    return { file: call?.file ?? { name, type_id: 1 } }
+  }
+  if (toolClass === 'http') {
+    return { httpRequest: call?.httpRequest ?? { http_method: 'GET' } }
+  }
+  return {}
+}
+
+/**
  * Map a `tool/call`, opening the correlation entry its result will close.
  * @param sessionId - the session the event belongs to.
  * @param event - the event's `seq`, `time`, and payload.
@@ -58,7 +88,12 @@ export function mapToolCall(
   const step = readNumber(event.data, 'step') ?? 0
   const details = toolDetails(name, toolClass, argumentsOf(event.data), config)
   const api = apiOf(toolClass, name)
-  state.openCall({ callId, name, toolClass, time: event.time, seq: event.seq, turn, step })
+  state.openCall({
+    callId, name, toolClass, time: event.time, seq: event.seq, turn, step,
+    ...details.process === undefined ? {} : { process: details.process },
+    ...details.file === undefined ? {} : { file: details.file },
+    ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
+  })
   return {
     classUid,
     activityId,
@@ -117,6 +152,7 @@ function settle(
     correlationUid: callCorrelationUid(sessionId, callId),
     ...call === undefined ? {} : { startTime: call.time, duration: Math.max(0, event.time - call.time) },
     ...toolClass === 'api' ? { api: { operation: `tool:${name}` } } : {},
+    ...subjectOf(toolClass, name, call),
     attributes: {
       tool: name,
       tool_class: toolClass,
@@ -172,7 +208,12 @@ export function mapCodeDispatchStart(
   const toolClass = classifyTool(name, config)
   const { classUid, activityId } = ocsfClassOf(toolClass)
   const details = toolDetails(name, toolClass, argumentsOf(event.data), config)
-  state.openCall({ callId: subCallId, name, toolClass, time: event.time, seq: event.seq, turn: 0, step: 0 })
+  state.openCall({
+    callId: subCallId, name, toolClass, time: event.time, seq: event.seq, turn: 0, step: 0,
+    ...details.process === undefined ? {} : { process: details.process },
+    ...details.file === undefined ? {} : { file: details.file },
+    ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
+  })
   return {
     classUid,
     activityId,
@@ -243,6 +284,7 @@ export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: nu
     startTime: call.time,
     duration: Math.max(0, time - call.time),
     ...call.toolClass === 'api' ? { api: { operation: `tool:${call.name}` } } : {},
+    ...subjectOf(call.toolClass, call.name, call),
     attributes: {
       tool: call.name,
       tool_class: call.toolClass,

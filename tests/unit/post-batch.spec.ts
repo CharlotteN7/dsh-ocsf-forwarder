@@ -30,21 +30,35 @@ async function collector(status: number, delayMs = 0): Promise<{ url: string; bo
 describe('postBatch', () => {
   it('reports acceptance and sends the configured headers', async () => {
     const { url, bodies } = await collector(200)
-    expect(await postBatch(url, { authorization: 'Bearer t' }, '{"resourceLogs":[]}', 5_000)).toBe(true)
+    expect(await postBatch(url, { authorization: 'Bearer t' }, '{"resourceLogs":[]}', 5_000)).toBe('accepted')
     expect(bodies).toEqual(['{"resourceLogs":[]}'])
   })
 
-  it('reports a rejection so the cursor stays put', async () => {
+  it('asks for a retry when the collector is unwell, so the cursor stays put', async () => {
     const { url } = await collector(503)
-    expect(await postBatch(url, {}, '{}', 5_000)).toBe(false)
+    expect(await postBatch(url, {}, '{}', 5_000)).toBe('retry')
   })
 
-  it('reports a timeout as a rejection rather than throwing', async () => {
+  it('asks for a retry on the client errors that mean "not now"', async () => {
+    for (const status of [408, 425, 429]) {
+      const { url } = await collector(status)
+      expect(await postBatch(url, {}, '{}', 5_000)).toBe('retry')
+      await new Promise<void>(resolve => { server?.close(() => resolve()) })
+      server = undefined
+    }
+  })
+
+  it('reports a refusal on the client errors that will never succeed', async () => {
+    const { url } = await collector(400)
+    expect(await postBatch(url, {}, '{}', 5_000)).toBe('reject')
+  })
+
+  it('reports a timeout as a retry rather than throwing', async () => {
     const { url } = await collector(200, 500)
-    expect(await postBatch(url, {}, '{}', 50)).toBe(false)
+    expect(await postBatch(url, {}, '{}', 50)).toBe('retry')
   })
 
-  it('reports an unreachable collector as a rejection', async () => {
-    expect(await postBatch('http://127.0.0.1:1/v1/logs', {}, '{}', 1_000)).toBe(false)
+  it('reports an unreachable collector as a retry', async () => {
+    expect(await postBatch('http://127.0.0.1:1/v1/logs', {}, '{}', 1_000)).toBe('retry')
   })
 })

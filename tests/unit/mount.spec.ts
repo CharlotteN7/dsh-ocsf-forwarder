@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as plugin from '../../src/index.ts'
 import { Config, inject, name } from '../../src/index.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
+import { dshOf } from './support.ts'
 
 let home: string
 
@@ -87,7 +88,7 @@ describe('mounting', () => {
 
     const records = spooled(spoolPath)
     expect(records).toHaveLength(2)
-    expect((records[1]?.['dsh'] as Record<string, unknown>)['unresolved']).toBe(true)
+    expect(dshOf(records[1] as OcsfRecord)['unresolved']).toBe(true)
   })
 
   it('adopts a session announced after mount', async () => {
@@ -118,9 +119,22 @@ describe('mounting', () => {
     expect(spooled(spoolPath)).toHaveLength(1)
   })
 
-  it('releases the spool on unload', async () => {
+  it('releases the spool on unload, so the same path can be mounted again', async () => {
     const { spoolPath, unload } = await mounted()
     await unload()
     expect(statSync(spoolPath).size).toBe(0)
+    const again = await mounted()
+    await again.unload()
+  })
+
+  it('reports its counters to the log, so a broken forwarder does not read as an idle one', async () => {
+    const lines: string[] = []
+    const { ctx, unload } = await mounted({ statsIntervalMs: 0 })
+    ctx.logger.info = (message: unknown): void => { lines.push(String(message)) }
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    emitEvent(ctx, subject, subject.events[0] as SessionEvent)
+    await unload()
+    expect(lines.some(line => line.includes('forwarded=1') && line.includes('failed=0'))).toBe(true)
   })
 })

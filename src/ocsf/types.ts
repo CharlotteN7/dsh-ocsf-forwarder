@@ -23,7 +23,7 @@ export interface OcsfProduct {
   readonly version: string
 }
 
-/** `metadata.extension` — the schema extension an record's extra attributes belong to. */
+/** One entry of `metadata.extensions` — a schema extension the record uses. */
 export interface OcsfExtension {
   readonly name: string
   readonly uid: number
@@ -35,7 +35,8 @@ export interface OcsfMetadata {
   readonly product: OcsfProduct
   readonly version: string
   readonly profiles?: readonly string[]
-  readonly extension?: OcsfExtension
+  /** `metadata.extension` has been deprecated since OCSF 1.1.0 in favour of this list. */
+  readonly extensions?: readonly OcsfExtension[]
   readonly log_provider?: string
   readonly log_name?: string
   /** Idempotency key: `<session id>:<event seq>`. */
@@ -110,6 +111,15 @@ export interface OcsfActor {
   readonly user?: OcsfUser
 }
 
+/**
+ * A `network_endpoint` object. API Activity requires `src_endpoint`: for an
+ * on-host agent the caller is the host itself.
+ */
+export interface OcsfNetworkEndpoint {
+  readonly hostname: string
+  readonly svc_name?: string
+}
+
 /** A `device` object. */
 export interface OcsfDevice {
   readonly type_id: number
@@ -177,6 +187,8 @@ export interface OcsfRecord {
   readonly delegation?: OcsfDelegation
   readonly actor?: OcsfActor
   readonly device?: OcsfDevice
+  /** Required by API Activity; the host the agent runs on. */
+  readonly src_endpoint?: OcsfNetworkEndpoint
   readonly process?: OcsfProcess
   readonly file?: OcsfFile
   readonly user?: OcsfUser

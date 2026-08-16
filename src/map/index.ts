@@ -69,13 +69,13 @@ export function mapEvent(
     case 'tool/result': return mapToolResult(sessionId, event, state, config)
     case 'tool/code-dispatch-start': return mapCodeDispatchStart(sessionId, event, state, config)
     case 'tool/code-dispatch': return mapCodeDispatch(sessionId, event, state, config)
-    case 'approval/asked': return mapApprovalAsked(sessionId, event, state)
+    case 'approval/asked': return mapApprovalAsked(sessionId, event, state, config)
     case 'approval/decided': return mapApprovalDecided(sessionId, event, state)
     case 'approval/policy':
     case 'sandbox/mode':
     case 'permission/preset': return mapAuthorizationState(event.type, event)
     case 'turn/start': return mapTurnStart(sessionId, event, state)
-    case 'turn/end': return mapTurnEnd(sessionId, event, state)
+    case 'turn/end': return mapTurnEnd(sessionId, event, state, config)
     case 'step/start': return mapStepStart(sessionId, event, state)
     case 'step/end': return mapStepEnd(sessionId, event, state)
     case 'assistant/message': return mapAssistantMessage(sessionId, event, config)
@@ -83,7 +83,7 @@ export function mapEvent(
     case 'request/context': return mapRequestContext(event, state)
     case 'request/header': return mapRequestHeader(event, config)
     case 'hook/invoked': return mapHookInvoked(sessionId, event)
-    case 'hook/result': return mapHookResult(sessionId, event)
+    case 'hook/result': return mapHookResult(sessionId, event, config)
     case 'subagent/descriptor': return mapSubagentDescriptor(sessionId, event)
     case 'tool-workflow/run-start':
     case 'tool-workflow/run-end':

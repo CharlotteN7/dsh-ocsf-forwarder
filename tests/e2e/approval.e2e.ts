@@ -8,11 +8,11 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { runAgent, type OcsfLine } from './harness.ts'
+import { dshOf, runAgent, type OcsfLine } from './harness.ts'
 
 /** Records of one event type, in spool order. */
 function ofType(records: readonly OcsfLine[], type: string): OcsfLine[] {
-  return records.filter(record => record.dsh['event_type'] === type)
+  return records.filter(record => dshOf(record)['event_type'] === type)
 }
 
 describe('approval events', () => {
@@ -51,37 +51,40 @@ describe('approval events', () => {
     expect(question.user).toMatchObject({ type_id: 1 })
 
     // Paired by the approval request id, repeated verbatim in the decision.
-    expect(decision.dsh['approval_id']).toBe(question.dsh['approval_id'])
+    expect(dshOf(decision)['approval_id']).toBe(dshOf(question)['approval_id'])
     expect(decision.metadata.correlation_uid).toBe(question.metadata.correlation_uid)
     expect(String(question.metadata.correlation_uid)).toContain(':approval:')
 
     // The fail-closed outcome, graded as a failure with the latency attached.
-    expect(decision.dsh['outcome']).toBe('unavailable')
+    expect(dshOf(decision)['outcome']).toBe('unavailable')
     expect(decision.status_id).toBe(2)
     expect(decision.status_detail).toBe('unavailable')
     expect(decision.severity_id).toBe(3)
-    expect(typeof decision.dsh['approval_latency_ms']).toBe('number')
-    expect(decision.dsh['approval_latency_ms'] as number).toBeGreaterThanOrEqual(0)
-    expect(decision.duration).toBe(decision.dsh['approval_latency_ms'])
+    expect(typeof dshOf(decision)['approval_latency_ms']).toBe('number')
+    expect(dshOf(decision)['approval_latency_ms'] as number).toBeGreaterThanOrEqual(0)
+    expect(decision.duration).toBe(dshOf(decision)['approval_latency_ms'])
     expect(decision.start_time).toBe(question.time)
-    expect(decision.dsh['asked_seq']).toBe(question.dsh['seq'])
-    expect(decision.dsh['unpaired']).toBeUndefined()
+    expect(dshOf(decision)['asked_seq']).toBe(dshOf(question)['seq'])
+    expect(dshOf(decision)['unpaired']).toBeUndefined()
 
     // The question names the tool call it is about, so the authorization joins
     // to the Process Activity records of the same call.
-    const callId = question.dsh['call_id']
+    const callId = dshOf(question)['call_id']
     expect(typeof callId).toBe('string')
     const call = ofType(result.ocsfRecords, 'tool/call')[0] as OcsfLine
-    expect(call.dsh['call_id']).toBe(callId)
+    expect(dshOf(call)['call_id']).toBe(callId)
 
     // The escalation was refused, so the tool call settled as an error and the
     // marker never ran.
     const settled = ofType(result.ocsfRecords, 'tool/result')[0] as OcsfLine
     expect(settled.status_id).toBe(2)
-    expect(settled.dsh['is_error']).toBe(true)
+    expect(dshOf(settled)['is_error']).toBe(true)
 
-    // The sandbox mode the run was confined to is itself recorded on the log
-    // when the session sets one; the ask reason is metadata, not content.
-    expect(String(question.dsh['reason'])).toContain('escalate sandbox to danger-full-access')
+    // The approval prompt quotes the action being approved, so the SOC lane
+    // carries its digest and length rather than its text.
+    expect(dshOf(question)['reason']).toBeUndefined()
+    expect(String(dshOf(question)['reason_digest'])).toMatch(/^hmac-sha256:/)
+    expect(dshOf(question)['reason_length'] as number).toBeGreaterThan(0)
+    expect(JSON.stringify(result.ocsfRecords)).not.toContain('escalate sandbox to danger-full-access')
   }, 120_000)
 })

@@ -5,11 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { runAgent, type OcsfLine } from './harness.ts'
+import { dshOf, runAgent, type OcsfLine } from './harness.ts'
 
 /** Records of one event type, in spool order. */
 function ofType(records: readonly OcsfLine[], type: string): OcsfLine[] {
-  return records.filter(record => record.dsh['event_type'] === type)
+  return records.filter(record => dshOf(record)['event_type'] === type)
 }
 
 describe('a real agent run, normalised to OCSF', () => {
@@ -45,26 +45,26 @@ describe('a real agent run, normalised to OCSF', () => {
     expect(call.activity_id).toBe(1)
     expect(call.type_uid).toBe(100701)
     expect(call.metadata.version).toBe('1.9.0')
-    expect(call.metadata.profiles).toEqual(['ai_operation'])
+    expect(call.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
 
     // Correlated by callId, through a correlation id both records carry.
     expect(call.metadata.correlation_uid).toBe(settled.metadata.correlation_uid)
-    expect(String(call.metadata.correlation_uid)).toContain(String(call.dsh['call_id']))
-    expect(settled.dsh['call_id']).toBe(call.dsh['call_id'])
-    expect(call.dsh['phase']).toBe('invoke')
-    expect(settled.dsh['phase']).toBe('complete')
+    expect(String(call.metadata.correlation_uid)).toContain(String(dshOf(call)['call_id']))
+    expect(dshOf(settled)['call_id']).toBe(dshOf(call)['call_id'])
+    expect(dshOf(call)['phase']).toBe('invoke')
+    expect(dshOf(settled)['phase']).toBe('complete')
 
     // The result closed the pair, so it carries an outcome and a duration.
     expect(settled.status_id).toBe(1)
-    expect(settled.dsh['is_error']).toBe(false)
+    expect(dshOf(settled)['is_error']).toBe(false)
     expect(typeof settled.duration).toBe('number')
     expect(settled.duration as number).toBeGreaterThanOrEqual(0)
     expect(settled.start_time).toBe(call.time)
 
     // Session identity comes from the Session object, never from the envelope.
-    expect(String(call.dsh['session_id']).length).toBeGreaterThan(0)
-    expect(call.ai_agent).toMatchObject({ instance_uid: call.dsh['session_id'], type_id: 1 })
-    expect(call.metadata.uid).toBe(`${String(call.dsh['session_id'])}:${String(call.dsh['seq'])}`)
+    expect(String(dshOf(call)['session_id']).length).toBeGreaterThan(0)
+    expect(call.ai_agent).toMatchObject({ instance_uid: dshOf(call)['session_id'], type_id: 1 })
+    expect(call.metadata.uid).toBe(`${String(dshOf(call)['session_id'])}:${String(dshOf(call)['seq'])}`)
 
     // The SOC lane classifies the command without carrying it.
     expect(call.process).toMatchObject({ name: 'printf' })
@@ -100,14 +100,20 @@ describe('a real agent run, normalised to OCSF', () => {
     const turnEnd = ofType(result.ocsfRecords, 'turn/end')[0] as OcsfLine
     expect(turnEnd.class_uid).toBe(6003)
     expect(turnEnd.status_id).toBe(1)
-    expect(turnEnd.dsh['end_reason']).toBe('completed')
+    expect(dshOf(turnEnd)['end_reason']).toBe('completed')
 
     // Every record is one JSON object per line carrying the required OCSF fields.
     for (const record of result.ocsfRecords) {
       expect(record.type_uid).toBe(record.class_uid * 100 + record.activity_id)
       expect(record.cloud).toEqual({ provider: 'Other' })
       expect(record.osint).toEqual([])
-      expect(record.metadata.extension).toMatchObject({ name: 'dsh', uid: 999 })
+      expect(record.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
+      // No extension uid is claimed, and nothing sits outside the class's own
+      // attributes: every OCSF class is `additionalProperties: false`.
+      expect(record.metadata.extension).toBeUndefined()
+      expect(record.metadata.extensions).toBeUndefined()
+      expect(record['dsh']).toBeUndefined()
+      expect(dshOf(record)['session_id']).toBeDefined()
     }
   }, 120_000)
 })
