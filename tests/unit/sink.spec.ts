@@ -240,6 +240,24 @@ describe('the shipper', () => {
     expect(rotatedGenerations(path)).toEqual([])
   })
 
+  it('does not re-ship what it had already delivered out of a file that then rotated', async () => {
+    const seen: string[] = []
+    const { instance, path } = shipper(async (_url, _headers, body) => { seen.push(...delivered(body)); return 'accepted' })
+    // Wide enough that the first two records are still in the live file when
+    // the shipper reaches them, so rotation moves bytes the cursor covers.
+    const sink = spool(path, { maxBytes: Buffer.byteLength(JSON.stringify(record('S:0'))) * 3 })
+    sink.write(record('S:0'))
+    sink.write(record('S:1'))
+    expect(await instance.drain()).toBe(2)
+    expect(rotatedGenerations(path)).toEqual([])
+
+    for (let index = 2; index < 12; index += 1) sink.write(record(`S:${String(index)}`))
+    sink.close()
+    expect(rotatedGenerations(path).length).toBeGreaterThan(0)
+    expect(await instance.drain()).toBe(10)
+    expect(seen).toEqual(Array.from({ length: 12 }, (_, index) => `S:${String(index)}`))
+  })
+
   it('keeps a generation it could not deliver, and every record still on disk', async () => {
     const { instance, path } = shipper(async () => 'retry')
     const sink = spool(path, { maxBytes: 200 })

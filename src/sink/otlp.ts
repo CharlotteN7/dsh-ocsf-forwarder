@@ -133,6 +133,8 @@ export class OtlpShipper {
   private quarantined = 0
   /** How far each rotated generation was drained in this process. */
   private readonly generationOffsets = new Map<string, number>()
+  /** Generations already accounted for, so a newly appeared one is recognisable. */
+  private readonly knownGenerations = new Set<string>()
 
   /**
    * @param options - the resolved shipper settings.
@@ -217,10 +219,33 @@ export class OtlpShipper {
     this.nextAttemptAt = Date.now() + delay
   }
 
+  /**
+   * Move the live cursor onto the generation it now indexes.
+   *
+   * Rotation renames the file the cursor pointed into. Everything before that
+   * offset was already delivered, so without this the generation is re-shipped
+   * from its first byte on every rotation — allowed by at-least-once, but a
+   * whole `spoolMaxBytes` of avoidable duplicates. The cursor predates the
+   * first of the newly appeared generations, so it indexes the oldest of them.
+   * @param generations - the generations present at the start of this pass.
+   */
+  private carryCursor(generations: readonly string[]): void {
+    const fresh = generations.filter(generation => !this.knownGenerations.has(generation))
+    for (const generation of generations) this.knownGenerations.add(generation)
+    const oldest = fresh[0]
+    if (oldest === undefined) return
+    const carried = this.cursor()
+    if (carried === 0) return
+    this.generationOffsets.set(oldest, carried)
+    writeFileSync(this.options.cursorPath, '0')
+  }
+
   /** One drain pass: every rotated generation oldest-first, then the live file. */
   private async drainOnce(): Promise<number> {
     let shipped = 0
-    for (const generation of rotatedGenerations(this.spoolPath)) {
+    const generations = rotatedGenerations(this.spoolPath)
+    this.carryCursor(generations)
+    for (const generation of generations) {
       const progress = await this.drainFile(
         generation,
         () => this.generationOffsets.get(generation) ?? 0,
@@ -232,6 +257,7 @@ export class OtlpShipper {
       if (!progress.drained) return shipped
       unlinkSync(generation)
       this.generationOffsets.delete(generation)
+      this.knownGenerations.delete(generation)
     }
     const live = await this.drainFile(
       this.spoolPath,

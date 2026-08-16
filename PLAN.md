@@ -361,7 +361,9 @@ session/event ──► map ──► SOC spool  (JSONL, appendFileSync, one rec
 - **Rotation** by `maxBytes`: rename to a fixed-width timestamped generation, `<spool>.<ISO instant>-<nnn>`,
   and reopen. Names are never reused, so no rotation overwrites a generation. The shipper drains
   generations oldest-first ahead of the live file and unlinks each only after every byte in it is
-  acknowledged. There is no inode following: a rotated file is drained by name.
+  acknowledged. There is no inode following: a rotated file is drained by name, and the delivery
+  cursor is carried onto the generation it indexes so a rotation does not resend the bytes already
+  acknowledged out of that file.
 - **Rotation stops** at `spoolMaxGenerations` un-drained generations. The live file then grows past
   `maxBytes` and the plugin says why. Deleting an unacknowledged generation to stay under a size limit
   would make the audit lane destroy the evidence it exists to keep.

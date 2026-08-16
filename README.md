@@ -182,7 +182,9 @@ The spool is written synchronously before anything is queued for shipping, so:
 **Rotation.** At `spoolMaxBytes` the live file is renamed to a fixed-width timestamped generation —
 `<spoolPath>.2026-08-16T11-42-22.123Z-000` — and a fresh live file is opened. A generation name is
 never reused, so rotation never overwrites one. The shipper drains generations oldest-first, ahead
-of the live file, and unlinks each only once the collector has acknowledged every byte in it. At
+of the live file, and unlinks each only once the collector has acknowledged every byte in it. The
+delivery cursor follows the rename onto the generation it now indexes, so rotation does not resend
+what was already delivered out of that file. At
 `spoolMaxGenerations` un-drained generations rotation stops: the live file grows past
 `spoolMaxBytes` and the plugin logs why. That is deliberate — an audit lane that deletes
 unacknowledged evidence to stay under a size limit is worse than one that gets loud and large.
