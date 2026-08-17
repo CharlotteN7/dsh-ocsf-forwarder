@@ -423,3 +423,19 @@ directory this process cannot write costs the uid its stability across restarts 
 but it does not fail the mount. Refusing to mount over an unwritable *sidecar* would cause the
 outage the spool's own write path deliberately refuses to cause, one step earlier. The bare `catch`
 around the read now says what it actually swallows — any read failure, not `ENOENT` alone.
+
+## 28. This package's `metadata.uid` does not move, and `dsh-netguard`'s does
+
+`dsh-netguard` emitted `<session>:<seq>` too, over a per-process counter of its own decisions
+rather than the session log's event sequence. Both start near 1 in the same session, so
+`session-88:4` named one record here and an unrelated Network Activity record there — and a SIEM
+following this README's "deduplicate on `metadata.uid`" silently dropped one of them.
+
+The namespace went into `dsh-netguard`'s key, not this one. This package is published and its
+records are already in indexes; changing the key breaks deduplication for every existing consumer,
+retroactively. `dsh-netguard` is `0.1.0` with none. The asymmetry is the decision — tidying the two
+into one scheme later recreates the collision. `dsh-netguard`'s ADR §18 carries the same reasoning
+from its side.
+
+`metadata.correlation_uid` stays identical in both, because there the shared value is the whole
+point: it is what joins a connection to the tool call that opened it.

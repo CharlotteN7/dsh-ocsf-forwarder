@@ -435,7 +435,7 @@ records with the verbatim event payload in `raw_data`, joined to the SOC lane on
 
 | Field | Joins |
 |---|---|
-| `metadata.uid` = `<session>:<seq>` | The idempotency key. Deduplicate on it. |
+| `metadata.uid` = `<session>:<seq>` | The idempotency key. Deduplicate on it. `<seq>` is the session log's own event sequence. `dsh-netguard` writes `<session>:netguard:<seq>` over a counter of its own, so deduplicating an index holding both packages does not drop its records as duplicates of these. |
 | `metadata.correlation_uid` | `<session>:<callId>` for a tool call and its result, `<session>:approval:<id>` for an approval pair, `<session>:turn:<n>`, `<session>:<turn>:<step>`. |
 | `metadata.sequence` | The session-log seq — a per-session gap detector. |
 | `ai_agent.instance_uid` / `unmapped.dsh.session_id` | The session. `parent_session_id` and `seed_length` stitch forks. |
