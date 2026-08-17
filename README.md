@@ -21,7 +21,8 @@ complete event → OCSF mapping table for all 44 session event types.
 - Emits a **high-severity record when a tool hands the task to an external harness**, stating in
   the record that telemetry coverage ends at that boundary.
 - Emits a periodic **heartbeat** carrying counters, live session count and delivery cursor, so a
-  host that goes quiet is distinguishable from one that is idle.
+  host that goes quiet is distinguishable from one that is idle. A spool that has stopped writing
+  reports itself there at `severity_id: 5`, with the count of what it dropped.
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.
 - Keeps raw values out of the SOC lane: keyed digests, value classifications and lengths instead.
 

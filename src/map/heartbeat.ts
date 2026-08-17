@@ -39,6 +39,10 @@ export interface HeartbeatState {
   readonly spoolHighWaterBytes: number
   /** True once a stop condition has held rotation and the live file is growing. */
   readonly rotationStopped: boolean
+  /** True while the spool has no descriptor after an I/O failure and is dropping every record. */
+  readonly sinkFailed: boolean
+  /** Records the spool dropped because it had no descriptor. */
+  readonly droppedRecords: number
   /** Byte offset delivery has reached in the live spool, absent when no shipper is configured. */
   readonly cursor?: number
   /** Records this process has set aside as refused, absent when no shipper is configured. */
@@ -54,10 +58,12 @@ export interface HeartbeatState {
 /**
  * Map one heartbeat.
  *
- * The spool crossing its high-water mark is the one condition that raises the
- * severity: a spool that is filling is an outage the SOC should learn about
+ * The spool crossing its high-water mark is one of two conditions that raise
+ * the severity: a spool that is filling is an outage the SOC should learn about
  * from the SIEM rather than from a full disk, and rotation refusing to run is
- * the same condition one step later.
+ * the same condition one step later. The other is a spool with no descriptor,
+ * which is not disk pressure but total loss, and is graded above it: records
+ * are going nowhere and the heartbeat itself is the only evidence left.
  * @param state - what this heartbeat reports.
  * @returns the record mapping.
  */
@@ -67,12 +73,15 @@ export function mapHeartbeat(state: HeartbeatState): EventMapping {
     classUid: CLASS.applicationLifecycle,
     activityId: ACTIVITY.applicationLifecycle.other,
     activityName: HEARTBEAT_ACTIVITY_NAME,
-    severityId: pressured ? SEVERITY.high : SEVERITY.informational,
-    statusId: STATUS.success,
-    message: pressured
-      ? `ocsf-forwarder heartbeat: spool at ${String(state.spoolBytes)} bytes, `
-        + `high-water mark ${String(state.spoolHighWaterBytes)}`
-      : 'ocsf-forwarder heartbeat',
+    severityId: state.sinkFailed ? SEVERITY.critical : pressured ? SEVERITY.high : SEVERITY.informational,
+    statusId: state.sinkFailed ? STATUS.failure : STATUS.success,
+    message: state.sinkFailed
+      ? `ocsf-forwarder heartbeat: spool has no writable descriptor and has dropped `
+        + `${String(state.droppedRecords)} record(s)`
+      : pressured
+        ? `ocsf-forwarder heartbeat: spool at ${String(state.spoolBytes)} bytes, `
+          + `high-water mark ${String(state.spoolHighWaterBytes)}`
+        : 'ocsf-forwarder heartbeat',
     attributes: {
       kind: HEARTBEAT_KIND,
       live_sessions: state.liveSessions,
@@ -84,6 +93,8 @@ export function mapHeartbeat(state: HeartbeatState): EventMapping {
       spool_high_water_bytes: state.spoolHighWaterBytes,
       spool_pressure: pressured,
       rotation_stopped: state.rotationStopped,
+      sink_failed: state.sinkFailed,
+      sink_dropped_records: state.droppedRecords,
       uptime_ms: state.uptimeMs,
       final: state.final,
       ...state.cursor === undefined ? {} : { shipper_cursor: state.cursor },

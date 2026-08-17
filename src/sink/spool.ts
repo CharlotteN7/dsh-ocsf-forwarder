@@ -13,11 +13,18 @@
  * every byte in it. And one process at a time owns a spool path, enforced by
  * an exclusive lock file taken at construction, because two processes rotating
  * the same path would each rename the inode the other is still writing into.
+ *
+ * A third rule keeps it under an I/O failure. Rotation is the only moment this
+ * spool holds no descriptor, and a failure there must not end with it holding
+ * none: the descriptor is always taken again, a spool that nonetheless has none
+ * warns and counts what it drops instead of accepting records into nothing, and
+ * every later write retries the open. `pressure()` carries both facts, so a
+ * dead audit sink is visible in the same heartbeat as a full one.
  * @module sink/spool
  */
 
 import {
-  closeSync, fchmodSync, mkdirSync, openSync, readFileSync, readdirSync,
+  closeSync, fchmodSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync,
   renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -27,7 +34,9 @@ import type { OcsfRecord } from '../ocsf/types.ts'
 export interface Sink {
   /**
    * Accept one record. Must not block on I/O beyond a local append. A failed
-   * append throws so the caller can leave its cursor on the unwritten event.
+   * append throws so the caller can leave its cursor on the unwritten event;
+   * an append that succeeded reports any trouble that followed it out of band,
+   * because the caller must not retry a record already on disk.
    * @param record - the finished OCSF record.
    */
   write(record: OcsfRecord): void
@@ -79,6 +88,23 @@ const COUNTER_DIGITS = 3
 const ROTATION_RECHECK_MS = 60_000
 
 /**
+ * First delay before a spool left without a descriptor tries to open one again.
+ *
+ * The first retry after a failure is immediate, because the condition that took
+ * the descriptor away is usually already gone by the next record — a rotation
+ * that lost a race with a directory permission change, an unlink under the live
+ * file — and a record dropped while waiting out a delay is evidence destroyed.
+ * Only once an immediate retry has itself failed does the delay open, doubling
+ * to {@link MAX_REOPEN_BACKOFF_MS}. Fixed rather than configurable for the same
+ * reason {@link ROTATION_RECHECK_MS} is: nothing about a deployment makes
+ * retrying a failed `open` at another rate correct.
+ */
+const REOPEN_BACKOFF_MS = 250
+
+/** Longest delay between attempts to reopen a failed spool. */
+const MAX_REOPEN_BACKOFF_MS = 30_000
+
+/**
  * Rotated generations of one spool, oldest first.
  *
  * The name is a fixed-width timestamp, so lexicographic order is chronological
@@ -107,6 +133,12 @@ function stamp(now: number): string {
   return new Date(now).toISOString().replace(/:/g, '-')
 }
 
+/** One filesystem error reduced to the code and message an operator acts on. */
+function describe(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === undefined ? String(error) : code
+}
+
 /** Size of one file, or zero when it has been removed under us. */
 function sizeOf(path: string): number {
   try {
@@ -126,12 +158,23 @@ export function spoolTotalBytes(spoolPath: string): number {
   return [spoolPath, ...rotatedGenerations(spoolPath)].reduce((sum, file) => sum + sizeOf(file), 0)
 }
 
-/** What a spool can say about its own disk pressure. */
+/** What a spool can say about its own health and disk pressure. */
 export interface SpoolPressure {
   /** Bytes across the live file and every rotated generation. */
   readonly totalBytes: number
-  /** True once a stop condition has held rotation and the live file is growing past `maxBytes`. */
+  /**
+   * True once a stop condition has held rotation and the live file is growing
+   * past `maxBytes`, or a rename failed and rotation is standing off.
+   */
   readonly rotationStopped: boolean
+  /**
+   * True while the spool has no open descriptor after an I/O failure, which
+   * means every record handed to it is being dropped. Deliberate closure is
+   * not this state.
+   */
+  readonly sinkFailed: boolean
+  /** Records this spool has dropped since construction because it had no descriptor. */
+  readonly droppedRecords: number
 }
 
 /**
@@ -186,6 +229,18 @@ export class SpoolSink implements Sink {
   private rotationRefused = false
   /** Earliest time a refused rotation consults the filesystem again. */
   private nextRotationCheckAt = 0
+  /** Set by {@link SpoolSink.close}, which is the one state where dropping a write is correct. */
+  private closed = false
+  /** Records dropped because the spool had no descriptor to write them to. */
+  private dropped = 0
+  /** Holds the dead-sink warning to one message per outage. */
+  private failureWarned = false
+  /** Holds the rotation-failure warning to one message per outage. */
+  private rotationFailureWarned = false
+  /** Earliest time a failed spool tries to open a descriptor again. */
+  private nextReopenAt = 0
+  /** Current reopen delay, zero until an immediate retry has failed. */
+  private reopenBackoffMs = 0
   /** Clock behind the generation stamps and the rotation re-check window. */
   private readonly now: () => number
 
@@ -208,11 +263,29 @@ export class SpoolSink implements Sink {
   }
 
   /**
-   * Append one record as a single line.
+   * Append one record as a single line, reopening the file first when an
+   * earlier failure left this spool without a descriptor.
+   *
+   * A spool with no descriptor drops the record, and says so: an audit sink
+   * that has stopped writing must not be indistinguishable from an idle one.
+   * The warning is latched to one message per outage, and every dropped record
+   * is counted into {@link SpoolSink.pressure}.
    * @param record - the finished OCSF record.
    */
   write(record: OcsfRecord): void {
-    if (this.fd === undefined) return
+    if (this.closed) return
+    if (this.fd === undefined) this.reopen()
+    if (this.fd === undefined) {
+      this.dropped += 1
+      if (!this.failureWarned) {
+        this.failureWarned = true
+        this.options.onWarn?.(
+          `spool ${this.options.path} has no writable descriptor and is dropping records; `
+          + 'every record handed to it until it reopens is lost',
+        )
+      }
+      return
+    }
     const line = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8')
     // `writeSync` may satisfy only part of a large buffer; the remainder is
     // written here rather than left as a truncated line for the shipper.
@@ -228,15 +301,22 @@ export class SpoolSink implements Sink {
   }
 
   /**
-   * What this spool currently occupies, and whether rotation has stopped.
-   * @returns the disk pressure a heartbeat reports.
+   * What this spool currently occupies, whether rotation has stopped, and
+   * whether it can write at all.
+   * @returns the health and disk pressure a heartbeat reports.
    */
   pressure(): SpoolPressure {
-    return { totalBytes: spoolTotalBytes(this.options.path), rotationStopped: this.rotationRefused }
+    return {
+      totalBytes: spoolTotalBytes(this.options.path),
+      rotationStopped: this.rotationRefused,
+      sinkFailed: this.fd === undefined && !this.closed,
+      droppedRecords: this.dropped,
+    }
   }
 
   /** Close the descriptor and release the path's lock; further writes are ignored. */
   close(): void {
+    this.closed = true
     if (this.fd !== undefined) {
       closeSync(this.fd)
       this.fd = undefined
@@ -266,6 +346,13 @@ export class SpoolSink implements Sink {
    * A refusal holds off the next attempt for {@link ROTATION_RECHECK_MS}, so a
    * stop condition that lasts an outage costs one directory listing a minute
    * rather than one per record.
+   *
+   * The rename is the one point where this spool holds no descriptor, so a
+   * failure there is reported and a descriptor is taken again unconditionally —
+   * on the new generation when the rename went through, on the original path
+   * when it did not. A spool left without a descriptor writes nothing for the
+   * rest of the process's life, which for an audit lane is worse than any
+   * rotation outcome.
    */
   private rotate(): void {
     if (this.fd === undefined) return
@@ -280,15 +367,70 @@ export class SpoolSink implements Sink {
       }
       return
     }
-    this.rotationRefused = false
     const current = stamp(this.now())
     this.counter = current === this.lastStamp ? this.counter + 1 : 0
     this.lastStamp = current
     closeSync(this.fd)
     this.fd = undefined
-    renameSync(this.options.path, `${this.options.path}.${current}-${String(this.counter).padStart(COUNTER_DIGITS, '0')}`)
-    this.fd = this.open()
-    this.bytes = 0
+    // A rotation failure is not an outage to wait out before reopening: the
+    // live file is still there and still writable in every case but the one
+    // that broke the rename.
+    this.nextReopenAt = 0
+    this.reopenBackoffMs = 0
+    try {
+      renameSync(this.options.path, `${this.options.path}.${current}-${String(this.counter).padStart(COUNTER_DIGITS, '0')}`)
+      this.rotationRefused = false
+      this.rotationFailureWarned = false
+    } catch (error: unknown) {
+      // Rotation has stopped just as surely as a refusal stops it, so the
+      // operator-facing signal says so and the next attempt stands off.
+      this.rotationRefused = true
+      this.nextRotationCheckAt = this.now() + ROTATION_RECHECK_MS
+      if (!this.rotationFailureWarned) {
+        this.rotationFailureWarned = true
+        this.options.onWarn?.(
+          `spool ${this.options.path} could not be rotated (${describe(error)}); `
+          + 'growing past spoolMaxBytes until the condition clears',
+        )
+      }
+    }
+    this.reopen()
+  }
+
+  /**
+   * Take a descriptor on the live path again, subject to the backoff a failed
+   * attempt opens.
+   *
+   * `bytes` is read back from the descriptor rather than assumed, because the
+   * file this reopens is empty after a rotation and holds everything written
+   * before the failure after a failed one.
+   */
+  private reopen(): void {
+    if (this.now() < this.nextReopenAt) return
+    let fd: number
+    try {
+      fd = this.open()
+    } catch {
+      // Whatever denied the open — a revoked permission, a removed directory,
+      // an exhausted descriptor table — is reported by `write` as the dropped
+      // records it causes, which is the count an operator can act on.
+      this.reopenBackoffMs = this.reopenBackoffMs === 0
+        ? REOPEN_BACKOFF_MS
+        : Math.min(this.reopenBackoffMs * 2, MAX_REOPEN_BACKOFF_MS)
+      this.nextReopenAt = this.now() + this.reopenBackoffMs
+      return
+    }
+    this.fd = fd
+    this.bytes = fstatSync(fd).size
+    this.reopenBackoffMs = 0
+    this.nextReopenAt = 0
+    if (this.failureWarned) {
+      this.failureWarned = false
+      this.options.onWarn?.(
+        `spool ${this.options.path} reopened after a write failure; `
+        + `${String(this.dropped)} record(s) were dropped while it had no descriptor`,
+      )
+    }
   }
 
   /**

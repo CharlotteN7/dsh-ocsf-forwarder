@@ -89,6 +89,8 @@ function emitted(): readonly OcsfRecord[] {
     spoolBytes: 0,
     spoolHighWaterBytes: 1_000,
     rotationStopped: false,
+    sinkFailed: false,
+    droppedRecords: 0,
     uptimeMs: 5,
     final: true,
   })

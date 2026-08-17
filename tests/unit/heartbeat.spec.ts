@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { Forwarder } from '../../src/forwarder.ts'
 import { HEARTBEAT_KIND, mapHeartbeat, type HeartbeatState } from '../../src/map/heartbeat.ts'
-import { CLASS, SEVERITY } from '../../src/ocsf/constants.ts'
+import { CLASS, SEVERITY, STATUS } from '../../src/ocsf/constants.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import type { Sink } from '../../src/sink/spool.ts'
 import { dshOf, testConfig, testEnvironment } from './support.ts'
@@ -15,6 +15,8 @@ function state(overrides: Partial<HeartbeatState> = {}): HeartbeatState {
     spoolBytes: 100,
     spoolHighWaterBytes: 1_000,
     rotationStopped: false,
+    sinkFailed: false,
+    droppedRecords: 0,
     uptimeMs: 60_000,
     final: false,
     ...overrides,
@@ -63,6 +65,22 @@ describe('the heartbeat mapping', () => {
 
   it('raises the alarm once rotation has stopped, whatever the byte count says', () => {
     expect(mapHeartbeat(state({ rotationStopped: true })).severityId).toBe(SEVERITY.high)
+  })
+
+  it('reports a spool that has stopped writing above every disk-pressure alarm', () => {
+    const mapping = mapHeartbeat(state({ sinkFailed: true, droppedRecords: 9 }))
+    expect(mapping.severityId).toBe(SEVERITY.critical)
+    expect(mapping.statusId).toBe(STATUS.failure)
+    expect(mapping.attributes?.['sink_failed']).toBe(true)
+    expect(mapping.attributes?.['sink_dropped_records']).toBe(9)
+    expect(mapping.message).toContain('dropped 9 record(s)')
+  })
+
+  it('says the sink is writing when it is', () => {
+    const mapping = mapHeartbeat(state())
+    expect(mapping.attributes?.['sink_failed']).toBe(false)
+    expect(mapping.attributes?.['sink_dropped_records']).toBe(0)
+    expect(mapping.statusId).toBe(STATUS.success)
   })
 })
 

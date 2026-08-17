@@ -74,12 +74,16 @@ one. It is deliberately absent from the counters it reports.
 | `live_sessions` | Sessions the store held when the heartbeat was taken. |
 | `forwarded` / `dropped` / `unreadable` / `failed` | The forwarder's counters. |
 | `spool_bytes` / `spool_high_water_bytes` / `spool_pressure` | Disk the spool occupies, the alarm threshold, and whether it has been crossed. |
-| `rotation_stopped` | True once a stop condition has held rotation and the live file is growing. |
+| `rotation_stopped` | True once a stop condition has held rotation and the live file is growing, including a rename that failed. |
+| `sink_failed` / `sink_dropped_records` | True while the spool has no writable descriptor, and how many records it has dropped because of that. |
 | `shipper_cursor` / `shipper_quarantined` / `shipper_destination` | Delivery position, refused records, and which destination. Absent with no shipper configured. |
 | `uptime_ms` / `final` | How long this forwarder has been mounted, and whether this is its last heartbeat. |
 
 `severity_id` rises to `4` when the spool crosses `spoolHighWaterBytes` or rotation has stopped, so
-the SOC learns from the SIEM rather than from a full disk.
+the SOC learns from the SIEM rather than from a full disk. It rises to `5` and `status_id` becomes
+`2` while `sink_failed` is true: that is not disk pressure but total loss, and the heartbeat is the
+only record still leaving the host. Alert on `sink_failed` separately from `spool_pressure` — a
+spool that is filling still has every record, and one that is failing has none of them.
 
 **Detecting absence** is well-trodden on the SIEM side and is not shipped here. Elastic's
 Elasticsearch-query rule supports an "is below" comparator, which is what absence detection needs;

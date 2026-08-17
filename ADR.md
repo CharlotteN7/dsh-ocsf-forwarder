@@ -439,3 +439,42 @@ from its side.
 
 `metadata.correlation_uid` stays identical in both, because there the shared value is the whole
 point: it is what joins a connection to the tool call that opened it.
+
+## 29. A rotation failure leaves the spool with a descriptor, or the spool says it has none
+
+Rotation closed the descriptor, cleared the field, renamed the file, and reopened. A `renameSync`
+that threw — a directory that went read-only for a moment, a filesystem remounted `ro` — left `fd`
+undefined for the rest of the process's life, and `write()`'s `if (this.fd === undefined) return`
+turned that into a silent no-op. A probe of fifteen records through a real `SpoolSink`, with the
+directory made read-only at record 3 and restored at record 5, lost nine of them: no warning, no
+counter, and `pressure()` still reporting `rotationStopped: false`. Every operator-facing signal
+said healthy while the audit sink was dead.
+
+Three things were wrong, and the third is what made it severe rather than merely bad.
+
+The rename is now the only statement inside the `try`, and a descriptor is taken again on the way
+out of it either way — on the new generation when the rename went through, on the original path
+when it did not. `bytes` is read back from the descriptor rather than assumed, so the reopened file
+is measured rather than presumed empty. A failed rename also sets `rotationRefused`, because
+rotation has stopped in exactly the sense §21's disk bound stops it and the live file is about to
+grow past `spoolMaxBytes`.
+
+A spool that nonetheless has no descriptor no longer returns silently. It counts every record it
+drops, warns once per outage, and retries the open on each later write — immediately on the first
+attempt, then backing off from 250 ms to 30 s, because the condition had usually already cleared by
+the next record and a record dropped while waiting out a delay is evidence destroyed. `close()` is
+excluded by an explicit flag: a deliberately closed spool ignoring writes is correct and stays
+silent.
+
+`pressure()` gained `sinkFailed` and `droppedRecords`, and the heartbeat carries both. A dead audit
+sink reports `severity_id: 5` and `status_id: 2`, above the `4` that disk pressure reports, because
+a spool that is filling still holds every record and one that is failing holds none. The heartbeat
+is the only record still leaving the host at that point, so it is where the fact has to be.
+
+None of this changes the rotation policy of §12 and §21. An audit lane may run out of disk; it may
+not silently delete unacknowledged evidence, and it may not silently stop writing either.
+
+The probe also reported a `<corrupt>` line, which is not one: it scans every file in the spool
+directory, and `<spoolPath>.lock` holds the owning pid rather than JSON. No partial record line
+exists — a rotation that fails leaves the live file exactly as the last complete `write()` left it,
+because the rename is attempted only between whole lines.

@@ -147,6 +147,8 @@ export function apply(ctx: Context, config: Config): void {
       spoolBytes: pressure.totalBytes,
       spoolHighWaterBytes: resolved.spoolHighWaterBytes,
       rotationStopped: pressure.rotationStopped,
+      sinkFailed: pressure.sinkFailed,
+      droppedRecords: pressure.droppedRecords,
       uptimeMs: Date.now() - mountedAt,
       final,
       ...shipper === undefined || resolved.shipper === undefined ? {} : {

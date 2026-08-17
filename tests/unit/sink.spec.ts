@@ -1,5 +1,5 @@
 /** The spool's durability behaviour and the shipper's cursor discipline. */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -136,7 +136,7 @@ describe('rotation', () => {
   it('reports the disk it occupies and whether rotation has stopped', () => {
     const path = join(home, 'ocsf.jsonl')
     const sink = spool(path, { maxBytes: 200, maxGenerations: 64, maxTotalBytes: 1_500 })
-    expect(sink.pressure()).toEqual({ totalBytes: 0, rotationStopped: false })
+    expect(sink.pressure()).toEqual({ totalBytes: 0, rotationStopped: false, sinkFailed: false, droppedRecords: 0 })
     for (let index = 0; index < 30; index += 1) sink.write(record(`S:${String(index)}`))
     const pressure = sink.pressure()
     sink.close()
@@ -207,6 +207,120 @@ describe('rotation', () => {
 
     expect(rotatedGenerations(path)).toHaveLength(1)
     expect(uidsOnDisk(path)).toEqual(['S:1', 'S:2', 'S:3'])
+  })
+})
+
+describe('a spool that hits an I/O failure', () => {
+  /**
+   * The failures below are produced by taking write permission away, which root
+   * ignores. A run as root would exercise the success path under a test named
+   * for the failure one, so it is skipped instead.
+   */
+  const asUser = process.getuid?.() !== 0
+
+  it.runIf(asUser)('keeps writing to the live file when a rotation cannot rename it', () => {
+    const dir = join(home, 'sealed')
+    mkdirSync(dir)
+    const path = join(dir, 'ocsf.jsonl')
+    const warnings: string[] = []
+    const sink = spool(path, { maxBytes: 200, onWarn: message => warnings.push(message) })
+    try {
+      for (let index = 0; index < 3; index += 1) sink.write(record(`S:${String(index)}`))
+      // Renaming the live file needs write permission on its directory; nothing
+      // else about the spool changes.
+      chmodSync(dir, 0o500)
+      for (let index = 3; index < 6; index += 1) sink.write(record(`S:${String(index)}`))
+      chmodSync(dir, 0o700)
+      for (let index = 6; index < 12; index += 1) sink.write(record(`S:${String(index)}`))
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+    const pressure = sink.pressure()
+    sink.close()
+
+    expect(uidsOnDisk(path)).toEqual(Array.from({ length: 12 }, (_, index) => `S:${String(index)}`))
+    expect(pressure.sinkFailed).toBe(false)
+    expect(pressure.droppedRecords).toBe(0)
+    // Rotation stopping is the honest report: the live file is now growing past
+    // spoolMaxBytes exactly as a refused rotation makes it.
+    expect(pressure.rotationStopped).toBe(true)
+    expect(warnings.filter(message => message.includes('could not be rotated'))).toHaveLength(1)
+    expect(statSync(path).size).toBeGreaterThan(200)
+  })
+
+  it.runIf(asUser)('warns once and counts every record it drops with no descriptor', () => {
+    const dir = join(home, 'unwritable')
+    mkdirSync(dir)
+    const path = join(dir, 'ocsf.jsonl')
+    const warnings: string[] = []
+    let clock = 1_700_000_000_000
+    const sink = spool(path, { maxBytes: 200, onWarn: message => warnings.push(message), now: () => clock })
+    try {
+      sink.write(record('S:0'))
+      // Neither the rename nor the reopen of the live file can succeed now, so
+      // the rotation leaves the spool with no descriptor at all.
+      chmodSync(path, 0o400)
+      chmodSync(dir, 0o500)
+      sink.write(record('S:1'))
+      sink.write(record('lost-1'))
+      sink.write(record('lost-2'))
+
+      const failed = sink.pressure()
+      expect(failed.sinkFailed).toBe(true)
+      expect(failed.droppedRecords).toBe(2)
+      expect(warnings.filter(message => message.includes('dropping records'))).toHaveLength(1)
+    } finally {
+      chmodSync(dir, 0o700)
+      chmodSync(path, 0o640)
+    }
+
+    // The next write past the backoff window takes a descriptor again rather
+    // than dropping records for the rest of the process's life.
+    clock += 250
+    sink.write(record('S:2'))
+    const recovered = sink.pressure()
+    sink.close()
+
+    expect(recovered.sinkFailed).toBe(false)
+    expect(recovered.droppedRecords).toBe(2)
+    expect(uidsOnDisk(path)).toEqual(['S:0', 'S:1', 'S:2'])
+    expect(warnings.some(message => message.includes('2 record(s) were dropped'))).toBe(true)
+  })
+
+  it.runIf(asUser)('holds off the retry after a failed reopen instead of calling open per record', () => {
+    const dir = join(home, 'held-off')
+    mkdirSync(dir)
+    const path = join(dir, 'ocsf.jsonl')
+    let clock = 1_700_000_000_000
+    const sink = spool(path, { maxBytes: 200, now: () => clock })
+    try {
+      sink.write(record('S:0'))
+      chmodSync(path, 0o400)
+      chmodSync(dir, 0o500)
+      sink.write(record('S:1'))
+      chmodSync(dir, 0o700)
+      chmodSync(path, 0o640)
+      // The condition has cleared, but the backoff window opened by the failed
+      // reopen has not, so this record is still dropped and counted.
+      sink.write(record('too-soon'))
+      expect(sink.pressure().droppedRecords).toBe(1)
+      clock += 250
+      sink.write(record('S:2'))
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+    sink.close()
+    expect(uidsOnDisk(path)).toEqual(['S:0', 'S:1', 'S:2'])
+  })
+
+  it('does not report a deliberately closed spool as a failed one', () => {
+    const path = join(home, 'closed.jsonl')
+    const warnings: string[] = []
+    const sink = spool(path, { onWarn: message => warnings.push(message) })
+    sink.close()
+    sink.write(record('a'))
+    expect(sink.pressure()).toEqual({ totalBytes: 0, rotationStopped: false, sinkFailed: false, droppedRecords: 0 })
+    expect(warnings).toEqual([])
   })
 })
 

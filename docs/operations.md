@@ -125,6 +125,20 @@ Neither bound is a retention policy and neither ever deletes a record. The alarm
 `severity_id: 4` while there is still room; a high-water mark above the stop condition would never
 fire in time, so that combination fails at load.
 
+**A write failure never ends the spool.** Renaming the live file is the one moment the spool holds
+no descriptor, so a failure there — a directory permission changed under it, a filesystem that went
+read-only — is reported through the plugin logger and a descriptor is taken again immediately: on
+the new generation when the rename went through, on the original file when it did not. Rotation is
+then held off for a minute and `rotation_stopped` reads true, exactly as a refused rotation reads.
+
+If the descriptor cannot be taken back at all, the spool says so rather than accepting records into
+nothing. Every record it drops is counted, the first one logs a warning, and the heartbeat carries
+`sink_failed: true` with `sink_dropped_records` at `severity_id: 5`. Each later write retries the
+open — immediately on the first attempt, then backing off from 250 ms to 30 s — and the first
+success logs how many records were lost in between. None of this is configurable: nothing about a
+deployment makes a different retry rate correct, and a slower first retry only destroys evidence
+whose cause has already cleared.
+
 **One writer per path.** A spool path is held by an exclusive `<spoolPath>.lock`. Two processes
 sharing one path would each rename the inode the other is writing into, so the second one fails at
 load with the pid that holds it. Give each process its own path — the bundle patch's
