@@ -364,3 +364,23 @@ entire point of the change.
 isolation. Define-then-run is one capability and the pair is what a detection wants to see, so both
 are graded the same rather than splitting the pair across two classes and losing the join.
 `cordis_inspect_self` is read-only and stays an API call.
+
+## 25. A refused rotation is re-checked on a window, not on every record
+
+§12 and §21 say rotation stops rather than deleting an unacknowledged generation. What that left
+behind was a hot-path defect: `write()` calls `rotate()` for every record once the live file is past
+`spoolMaxBytes`, `rotate()` consults the two stop conditions before the refusal latch — a
+`readdirSync` of the spool's directory plus a `statSync` per generation — and the byte counter is
+reset only by a rotation that succeeds. So the counter stays past the threshold for the whole
+outage, and every spooled record pays for a directory listing on the agent's event loop.
+
+Measured on 300 records with 2000 files in the spool directory: 2 ms when the threshold has not been
+reached, 312 ms once rotation is refused. That is ~1 ms of synchronous blocking per record,
+indefinitely, triggered by exactly the collector outage the spool exists to survive, and it grows
+with the directory.
+
+A refusal now holds off the next check for 60 seconds. The latch alone would have been wrong —
+rotation must resume once the shipper drains a generation, and nothing else re-arms it — and
+resetting the byte counter would delay resumption by another whole `spoolMaxBytes`, which is
+hundreds of megabytes. The window costs at most a minute of extra growth against that same
+threshold. The rotation policy itself is unchanged: this is a hot-path fix, not a retention change.

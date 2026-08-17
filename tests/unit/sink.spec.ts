@@ -166,6 +166,48 @@ describe('rotation', () => {
     expect(statSync(path).size).toBeGreaterThan(200)
     expect(warnings[0]).toContain('un-drained rotated generations')
   })
+
+  it('keeps the rotation check off the hot path for as long as a stop condition holds', () => {
+    const path = join(home, 'ocsf.jsonl')
+    // A refused rotation costs a listing of the spool's directory, so the
+    // directory is what makes the per-record cost measurable. A spool a
+    // collector outage has been filling has neighbours in exactly this order.
+    for (let index = 0; index < 2_000; index += 1) writeFileSync(join(home, `neighbour-${String(index)}`), '')
+    const warnings: string[] = []
+    const sink = spool(path, { maxBytes: 1, maxGenerations: 0, onWarn: message => warnings.push(message) })
+
+    const startedAt = process.hrtime.bigint()
+    for (let index = 0; index < 300; index += 1) sink.write(record(`S:${String(index)}`))
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6
+    sink.close()
+
+    expect(warnings).toHaveLength(1)
+    expect(uidsOnDisk(path)).toHaveLength(300)
+    // These 300 appends are ~2 ms of work. Checking the stop condition per
+    // record instead of per window made them 340 ms of synchronous blocking on
+    // the agent's event loop, and that figure grows with the directory.
+    expect(elapsedMs).toBeLessThan(100)
+  })
+
+  it('rotates again once the re-check window has passed and the shipper has drained a generation', () => {
+    const path = join(home, 'ocsf.jsonl')
+    let clock = 1_700_000_000_000
+    const sink = spool(path, { maxBytes: 200, maxGenerations: 1, now: () => clock })
+    sink.write(record('S:0'))
+    sink.write(record('S:1'))
+    expect(rotatedGenerations(path)).toHaveLength(1)
+
+    rmSync(rotatedGenerations(path)[0] as string)
+    sink.write(record('S:2'))
+    expect(rotatedGenerations(path)).toHaveLength(0)
+
+    clock += 60_000
+    sink.write(record('S:3'))
+    sink.close()
+
+    expect(rotatedGenerations(path)).toHaveLength(1)
+    expect(uidsOnDisk(path)).toEqual(['S:1', 'S:2', 'S:3'])
+  })
 })
 
 describe('spool ownership', () => {

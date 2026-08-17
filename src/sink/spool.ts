@@ -55,6 +55,8 @@ export interface SpoolOptions {
   readonly mode: number
   /** Reports a condition an operator must act on; must not throw. */
   readonly onWarn?: (message: string) => void
+  /** Injectable so a test can drive the rotation re-check window. */
+  readonly now?: () => number
 }
 
 /** Matches one rotated generation of a spool file: `<name>.<ISO stamp>-<counter>`. */
@@ -62,6 +64,19 @@ const GENERATION_SUFFIX = /\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-\d{3}$/
 
 /** Width of the per-millisecond collision counter in a generation name. */
 const COUNTER_DIGITS = 3
+
+/**
+ * How long a refused rotation stands before the filesystem is consulted again.
+ *
+ * A stop condition is cleared by the shipper draining a generation, which it
+ * attempts every `flushIntervalMs` — five seconds by default. Noticing up to a
+ * minute late costs the live file a minute of growth against a threshold
+ * measured in hundreds of megabytes, and it keeps a directory listing per
+ * spooled record off the agent's event loop for as long as the collector is
+ * down. It is fixed rather than configurable for the same reason the counter
+ * width is: nothing about a deployment makes another value right.
+ */
+const ROTATION_RECHECK_MS = 60_000
 
 /**
  * Rotated generations of one spool, oldest first.
@@ -169,6 +184,10 @@ export class SpoolSink implements Sink {
   private counter = 0
   private lastStamp = ''
   private rotationRefused = false
+  /** Earliest time a refused rotation consults the filesystem again. */
+  private nextRotationCheckAt = 0
+  /** Clock behind the generation stamps and the rotation re-check window. */
+  private readonly now: () => number
 
   /**
    * Take the spool path's lock, then open (or create) the file, creating
@@ -176,6 +195,7 @@ export class SpoolSink implements Sink {
    * @param options - path, rotation thresholds, file mode, and the warning channel.
    */
   constructor(private readonly options: SpoolOptions) {
+    this.now = options.now ?? Date.now
     mkdirSync(dirname(options.path), { recursive: true })
     this.lockFd = acquireLock(`${options.path}.lock`)
     try {
@@ -201,7 +221,10 @@ export class SpoolSink implements Sink {
       written += writeSync(this.fd, line, written, line.length - written)
     }
     this.bytes += line.length
-    if (this.bytes >= this.options.maxBytes) this.rotate()
+    // A refused rotation leaves `bytes` past the threshold for every later
+    // record, so without the re-check window `rotate` would list the spool
+    // directory once per spooled record for as long as the stop condition holds.
+    if (this.bytes >= this.options.maxBytes && this.now() >= this.nextRotationCheckAt) this.rotate()
   }
 
   /**
@@ -239,11 +262,16 @@ export class SpoolSink implements Sink {
    * room would destroy the only copy of records the collector has not
    * acknowledged. An audit lane may run out of disk. It may not quietly delete
    * the evidence it exists to keep.
+   *
+   * A refusal holds off the next attempt for {@link ROTATION_RECHECK_MS}, so a
+   * stop condition that lasts an outage costs one directory listing a minute
+   * rather than one per record.
    */
   private rotate(): void {
     if (this.fd === undefined) return
     const reason = this.rotationBlockedBy()
     if (reason !== undefined) {
+      this.nextRotationCheckAt = this.now() + ROTATION_RECHECK_MS
       if (!this.rotationRefused) {
         this.rotationRefused = true
         this.options.onWarn?.(
@@ -253,7 +281,7 @@ export class SpoolSink implements Sink {
       return
     }
     this.rotationRefused = false
-    const current = stamp(Date.now())
+    const current = stamp(this.now())
     this.counter = current === this.lastStamp ? this.counter + 1 : 0
     this.lastStamp = current
     closeSync(this.fd)

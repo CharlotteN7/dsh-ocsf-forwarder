@@ -463,7 +463,9 @@ what was already delivered out of that file. Rotation stops at either of two bou
 past `spoolMaxBytes` and the plugin logs why. That is deliberate — an audit lane that deletes
 unacknowledged evidence to stay under a size limit is worse than one that gets loud and large. The
 second bound exists because a file count bounds nothing about the disk once the live file is the
-one growing.
+one growing. Once a bound has stopped rotation, the two conditions are re-checked at most once a
+minute rather than once per record, so an outage costs the agent one directory listing a minute;
+rotation resumes within that window of the shipper draining a generation.
 
 Neither bound is a retention policy and neither ever deletes a record. The alarm is
 `spoolHighWaterBytes`, which sits below the stop condition and raises the heartbeat to
