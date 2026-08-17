@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { resolveConfig, type Config } from './config.ts'
@@ -65,7 +66,10 @@ const PLUGIN_VERSION = (JSON.parse(
  * @param config - validated `cordis.yml` configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  const base = resolveConfig(config)
+  const report = (error: unknown): void => {
+    ctx.logger.warn(`ocsf-forwarder: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const base = resolveConfig(config, process.env, hostname(), report)
   // The provider a delegation tool starts runs on is fixed per plugin row and
   // absent from the tool-call payload, so the composed rows are read here —
   // the earliest point the registry is populated — rather than guessed later.
@@ -77,9 +81,6 @@ export function apply(ctx: Context, config: Config): void {
     ),
   }
   const env = createEnvironment(resolved, PLUGIN_VERSION)
-  const report = (error: unknown): void => {
-    ctx.logger.warn(`ocsf-forwarder: ${error instanceof Error ? error.message : String(error)}`)
-  }
 
   const warn = (message: string): void => { ctx.logger.warn(`ocsf-forwarder: ${message}`) }
   const soc = new SpoolSink({

@@ -131,7 +131,7 @@ so naming both fails at load.
 | `<shipper>.headers` / `batchSize` / `flushIntervalMs` / `timeoutMs` / `cursorPath` | `{}` / `256` / `5000` / `10000` / `<spoolPath>.cursor` | Delivery settings, on either shipper block. |
 | `<shipper>.maxReadBytes` / `maxBackoffMs` / `quarantinePath` | `8388608` / `300000` / `<spoolPath>.quarantine` | Largest spool region read in one pass, the backoff ceiling, and where refused batches are set aside. |
 | `fleet.tenantUid` / `labels` / `tags` | — | `metadata.tenant_uid`, `metadata.labels` (string list) and `metadata.tags` (a map, rendered as OCSF `key_value_object` entries). Never inferred. |
-| `fleet.installUid` / `installUidPath` | generated / `<spoolPath>.install-uid` | `device.uid`. Minted once and persisted, so a renamed host is still the same device. |
+| `fleet.installUid` / `installUidPath` | generated / `$DSH_HOME/install-uid` | `device.uid`. Minted once and persisted, so a renamed host is still the same device — and so every plugin in this suite reports the same device. |
 | `delegationTools` | `{}` | Tool name → provider, for delegation tools registry discovery cannot see. An entry may add a name; it may not un-name a discovered one. |
 | `privacy.argumentValues` | `digest` | `omit`, `digest`, or `full` for tool-argument values. |
 | `privacy.commandLine` | `digest` | `digest` or `full` for command lines. |
@@ -413,7 +413,7 @@ tenant is worse than an absent one, so an unconfigured field is omitted.
 | `metadata.tenant_uid` | `fleet.tenantUid`. |
 | `metadata.labels` | `fleet.labels`, a string list. |
 | `metadata.tags` | `fleet.tags`, a map. OCSF types this as an array of `key_value_object`, so `{owner: soc}` is emitted as `[{"name":"owner","value":"soc"}]` — `labels` is the slot for bare strings. |
-| `device.uid` | `fleet.installUid`, or a uid minted once and persisted at `fleet.installUidPath`. A hostname is not an identity: it changes when a laptop is renamed and collides across a fleet imaged from one template. |
+| `device.uid` | `fleet.installUid`, or a uid minted once and persisted at `fleet.installUidPath`, which defaults to `$DSH_HOME/install-uid`. A hostname is not an identity: it changes when a laptop is renamed and collides across a fleet imaged from one template. The path is under the harness home rather than beside the spool so that `dsh-netguard`, whose spool is elsewhere, reports the same `device.uid` for this machine. A uid an earlier release left at `<spoolPath>.install-uid` is carried over on first run, so upgrading does not re-identify the host. Persisting is best effort: a home this process cannot write costs the uid its stability across restarts, and is reported, but never fails the mount. |
 | `metadata.original_time` | The session log's own rendering of the append time, passed through as a string. OCSF wants "a pass-through string in its native format… not normalized" — the normalised value is `time` — and says to omit it for generated events, so the heartbeat carries none. |
 
 ## Two lanes

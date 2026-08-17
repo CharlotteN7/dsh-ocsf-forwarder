@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../../src/index.ts'
 import { Config, inject, name } from '../../src/index.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
@@ -12,8 +12,16 @@ import { dshOf } from './support.ts'
 
 let home: string
 
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'dsh-ocsf-mount-')) })
-afterEach(() => { rmSync(home, { recursive: true, force: true }) })
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'dsh-ocsf-mount-'))
+  // `apply` resolves the install uid under the harness home, which must be this
+  // throwaway one rather than the developer's.
+  vi.stubEnv('DSH_HOME', home)
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+  rmSync(home, { recursive: true, force: true })
+})
 
 /**
  * A session shaped like the one the store hands a listener. The cast is the
@@ -217,13 +225,13 @@ describe('mounting', () => {
     expect(attributes['shipper_destination']).toBe('otlp')
   })
 
-  it('mints an install uid beside the spool and stamps it on every record', async () => {
+  it('mints an install uid under the harness home and stamps it on every record', async () => {
     const { ctx, spoolPath } = await mounted()
     const subject = session('s1')
     subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
     emitEvent(ctx, subject, subject.events[0] as SessionEvent)
 
-    const installUid = readFileSync(`${spoolPath}.install-uid`, 'utf8').trim()
+    const installUid = readFileSync(join(home, 'install-uid'), 'utf8').trim()
     expect(installUid).toMatch(/^[0-9a-f-]{36}$/)
     expect(spooled(spoolPath)[0]?.device?.uid).toBe(installUid)
   })

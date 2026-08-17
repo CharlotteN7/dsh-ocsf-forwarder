@@ -11,8 +11,8 @@
 
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { hostname as osHostname } from 'node:os'
-import { dirname } from 'node:path'
+import { homedir, hostname as osHostname } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { PRODUCT_NAME } from './ocsf/constants.ts'
 import { createOtlpTransport } from './sink/otlp.ts'
@@ -158,7 +158,8 @@ export interface Config {
     installUid?: string
     /**
      * Where the generated install uid is persisted, so a renamed host keeps its
-     * identity. Defaults to `<spoolPath>.install-uid`.
+     * identity. Defaults to `$DSH_HOME/install-uid`, which every plugin in this
+     * suite reads, so one machine reports one `device.uid`.
      */
     installUidPath?: string
   }
@@ -590,57 +591,115 @@ function resolveShipper(
   }
 }
 
+/** Name of the install uid file under the harness home. */
+const INSTALL_UID_NAME = 'install-uid'
+
+/**
+ * Resolve the harness home the same way the harness does: `$DSH_HOME` when it
+ * is set to something other than whitespace, otherwise `~/.dsh`. Read here
+ * rather than through `@deepseek-ai/dsh-home-paths` to keep this package's
+ * runtime imports to the ones a profile is guaranteed to resolve.
+ * @param env - the process environment.
+ * @returns the absolute harness home.
+ */
+function resolveDshHome(env: NodeJS.ProcessEnv): string {
+  const configured = env['DSH_HOME']
+  return resolve(configured !== undefined && configured.trim().length > 0 ? configured : join(homedir(), '.dsh'))
+}
+
 /**
  * Resolve the fleet identity, generating and persisting an install uid the
  * first time one is needed.
  *
  * A hostname is not an identity: it changes when a laptop is renamed and
- * collides across a fleet built from one image. The uid is written beside the
- * spool so the same installation keeps it across restarts.
+ * collides across a fleet built from one image. The uid is written under the
+ * harness home so the same installation keeps it across restarts, and so the
+ * other plugins in this suite report the same `device.uid` for this machine
+ * rather than each minting their own beside their own spool.
  * @param config - the validated configuration.
+ * @param env - the process environment, read for `DSH_HOME`.
+ * @param onFailure - notified when the uid cannot be persisted.
  * @returns the identity stamped onto every record.
  */
-function resolveFleet(config: Config): ResolvedFleet {
+function resolveFleet(config: Config, env: NodeJS.ProcessEnv, onFailure: (error: unknown) => void): ResolvedFleet {
   const labels = config.fleet?.labels ?? []
   const tags = Object.entries(config.fleet?.tags ?? {}).map(([name, value]) => ({ name, value }))
+  const configuredPath = config.fleet?.installUidPath
   return {
     tenantUid: config.fleet?.tenantUid,
     labels: labels.length === 0 ? undefined : [...labels],
     tags: tags.length === 0 ? undefined : tags,
-    installUid: config.fleet?.installUid
-      ?? readOrCreateInstallUid(config.fleet?.installUidPath ?? `${config.spoolPath}.install-uid`),
+    installUid: config.fleet?.installUid ?? (configuredPath === undefined
+      ? readOrCreateInstallUid(
+        join(resolveDshHome(env), INSTALL_UID_NAME),
+        `${config.spoolPath}.install-uid`,
+        onFailure,
+      )
+      : readOrCreateInstallUid(configuredPath, undefined, onFailure)),
   }
+}
+
+/** The uid one file holds, or `undefined` when there is none there to read. */
+function readInstallUid(path: string): string | undefined {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    // Any read failure: absent on first run, and unreadable is the same
+    // answer — this process has no persisted uid at that path.
+    return undefined
+  }
+  const uid = text.trim()
+  return uid.length === 0 ? undefined : uid
 }
 
 /**
  * Read the persisted install uid, minting one on first run.
+ *
+ * Persisting it is best effort. A directory this process cannot write is a
+ * reason for records to carry a per-process uid, not a reason to refuse the
+ * mount — that is the outage the spool's own write path deliberately refuses to
+ * cause, and failing here would cause it one step earlier.
  * @param path - where the uid is kept.
+ * @param legacyPath - where releases up to 0.2.1 kept it, carried over so an
+ *   upgrade does not re-identify the host; `undefined` when the deployment
+ *   named the path itself.
+ * @param onFailure - notified when the uid cannot be persisted.
  * @returns the uid this installation reports as `device.uid`.
  */
-function readOrCreateInstallUid(path: string): string {
+function readOrCreateInstallUid(
+  path: string,
+  legacyPath: string | undefined,
+  onFailure: (error: unknown) => void,
+): string {
+  const persisted = readInstallUid(path)
+  if (persisted !== undefined) return persisted
+  const uid = (legacyPath === undefined ? undefined : readInstallUid(legacyPath)) ?? randomUUID()
   try {
-    const existing = readFileSync(path, 'utf8').trim()
-    if (existing.length > 0) return existing
-  } catch {
-    // ENOENT only: this installation has not minted a uid yet.
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${uid}\n`, { mode: 0o640 })
+  } catch (error: unknown) {
+    onFailure(error)
   }
-  const minted = randomUUID()
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${minted}\n`, { mode: 0o640 })
-  return minted
+  return uid
 }
 
 /**
  * Turn validated configuration into the runtime values the forwarder uses,
  * failing loud on anything that cannot be resolved.
  * @param config - the validated configuration.
- * @param env - the process environment, read for an `env`-sourced HMAC key.
+ * @param env - the process environment, read for an `env`-sourced HMAC key and `DSH_HOME`.
+ * @param hostname - this machine's hostname, the default Splunk `host`.
+ * @param onFailure - notified when the install uid cannot be persisted; `apply`
+ *   passes the plugin's reporter, and a caller without one loses only the uid's
+ *   stability across restarts.
  * @returns the complete resolved configuration.
  */
 export function resolveConfig(
   config: Config,
   env: NodeJS.ProcessEnv = process.env,
   hostname: string = osHostname(),
+  onFailure: (error: unknown) => void = () => {},
 ): ResolvedConfig {
   const dropped = new Set([...DEFAULT_DROPPED_EVENT_TYPES, ...config.dropEventTypes ?? []])
   for (const type of config.includeEventTypes ?? []) dropped.delete(type)
@@ -670,7 +729,7 @@ export function resolveConfig(
     statsIntervalMs: assertNonNegative('statsIntervalMs', config.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS),
     restrictedPath: resolveRestrictedPath(config),
     shipper: resolveShipper(config, env, hostname),
-    fleet: resolveFleet(config),
+    fleet: resolveFleet(config, env, onFailure),
     argumentValues: config.privacy?.argumentValues ?? 'digest',
     commandLine: config.privacy?.commandLine ?? 'digest',
     url: config.privacy?.url ?? 'host',

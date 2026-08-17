@@ -1,8 +1,8 @@
 /** Configuration validation and the load-time failures it is responsible for. */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Config, DEFAULT_DROPPED_EVENT_TYPES, resolveConfig } from '../../src/config.ts'
 
 /**
@@ -14,7 +14,10 @@ const minimal = { spoolPath: '/var/log/dsh/ocsf.jsonl', fleet: { installUid: 'in
 let home: string
 
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'dsh-ocsf-config-')) })
-afterEach(() => { rmSync(home, { recursive: true, force: true }) })
+afterEach(() => {
+  vi.unstubAllEnvs()
+  rmSync(home, { recursive: true, force: true })
+})
 
 describe('Config validation', () => {
   it('rejects configuration without a spool path', () => {
@@ -218,20 +221,90 @@ describe('fleet identity', () => {
     expect(resolved.fleet.tags).toBeUndefined()
   })
 
-  it('mints an install uid once and reuses it, so a renamed host is still the same device', () => {
+  it('mints an install uid once under the harness home, so every plugin here reports one device', () => {
     const spoolPath = join(home, 'ocsf.jsonl')
-    const first = resolveConfig({ spoolPath }).fleet.installUid
-    const second = resolveConfig({ spoolPath }).fleet.installUid
+    const dshHome = join(home, 'dsh-home')
+    const first = resolveConfig({ spoolPath }, { DSH_HOME: dshHome }).fleet.installUid
+    const second = resolveConfig({ spoolPath }, { DSH_HOME: dshHome }).fleet.installUid
     expect(first).toMatch(/^[0-9a-f-]{36}$/)
     expect(second).toBe(first)
-    expect(readFileSync(`${spoolPath}.install-uid`, 'utf8').trim()).toBe(first)
+    expect(readFileSync(join(dshHome, 'install-uid'), 'utf8').trim()).toBe(first)
+    // A different spool under the same home is the same machine.
+    expect(resolveConfig({ spoolPath: join(home, 'other.jsonl') }, { DSH_HOME: dshHome }).fleet.installUid)
+      .toBe(first)
+  })
+
+  it('carries over a uid an earlier release left beside the spool, rather than re-identifying the host', () => {
+    const spoolPath = join(home, 'ocsf.jsonl')
+    const dshHome = join(home, 'dsh-home')
+    writeFileSync(`${spoolPath}.install-uid`, 'laptop-17\n')
+
+    expect(resolveConfig({ spoolPath }, { DSH_HOME: dshHome }).fleet.installUid).toBe('laptop-17')
+    expect(readFileSync(join(dshHome, 'install-uid'), 'utf8').trim()).toBe('laptop-17')
+  })
+
+  it('prefers the uid under the harness home over the one beside the spool', () => {
+    const spoolPath = join(home, 'ocsf.jsonl')
+    const dshHome = join(home, 'dsh-home')
+    mkdirSync(dshHome, { recursive: true })
+    writeFileSync(join(dshHome, 'install-uid'), 'shared-9\n')
+    writeFileSync(`${spoolPath}.install-uid`, 'laptop-17\n')
+
+    expect(resolveConfig({ spoolPath }, { DSH_HOME: dshHome }).fleet.installUid).toBe('shared-9')
   })
 
   it('reads an install uid a deployment placed at the configured path', () => {
     const installUidPath = join(home, 'fleet.uid')
     writeFileSync(installUidPath, 'laptop-17\n')
-    expect(resolveConfig({ spoolPath: join(home, 'ocsf.jsonl'), fleet: { installUidPath } }).fleet.installUid)
-      .toBe('laptop-17')
+    expect(resolveConfig({ spoolPath: join(home, 'ocsf.jsonl'), fleet: { installUidPath } }, { DSH_HOME: home })
+      .fleet.installUid).toBe('laptop-17')
+  })
+
+  it('mints at the configured path, without reading the sidecar an earlier release left', () => {
+    const spoolPath = join(home, 'ocsf.jsonl')
+    writeFileSync(`${spoolPath}.install-uid`, 'laptop-17\n')
+    const installUidPath = join(home, 'fleet.uid')
+
+    const uid = resolveConfig({ spoolPath, fleet: { installUidPath } }, { DSH_HOME: home }).fleet.installUid
+
+    expect(uid).toMatch(/^[0-9a-f-]{36}$/)
+    expect(readFileSync(installUidPath, 'utf8').trim()).toBe(uid)
+  })
+
+  it('reports a uid it cannot persist rather than failing the mount over an audit sidecar', () => {
+    const unwritable = join(home, 'unwritable')
+    mkdirSync(unwritable, { mode: 0o500 })
+    const failures: unknown[] = []
+
+    const resolved = resolveConfig(
+      { spoolPath: join(home, 'ocsf.jsonl') },
+      { DSH_HOME: join(unwritable, 'dsh') },
+      'host-1',
+      error => failures.push(error),
+    )
+
+    expect(resolved.fleet.installUid).toMatch(/^[0-9a-f-]{36}$/)
+    expect(failures).toHaveLength(1)
+    // A caller that supplied no reporter loses the uid's stability, nothing else.
+    expect(resolveConfig({ spoolPath: join(home, 'ocsf.jsonl') }, { DSH_HOME: join(unwritable, 'dsh') })
+      .fleet.installUid).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('mints a uid over an empty sidecar rather than reporting an empty device uid', () => {
+    const dshHome = join(home, 'dsh-home')
+    mkdirSync(dshHome, { recursive: true })
+    writeFileSync(join(dshHome, 'install-uid'), '\n')
+
+    expect(resolveConfig({ spoolPath: join(home, 'ocsf.jsonl') }, { DSH_HOME: dshHome }).fleet.installUid)
+      .toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('falls back to ~/.dsh when DSH_HOME is unset or blank, as the harness does', () => {
+    vi.stubEnv('HOME', home)
+
+    const uid = resolveConfig({ spoolPath: join(home, 'ocsf.jsonl') }, { DSH_HOME: '   ' }).fleet.installUid
+
+    expect(readFileSync(join(home, '.dsh', 'install-uid'), 'utf8').trim()).toBe(uid)
   })
 })
 

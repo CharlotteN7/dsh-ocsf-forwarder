@@ -400,3 +400,26 @@ which the README documents as reporting at unload only, and is checked as non-ne
 
 This is upstream's rule, not a local preference: misconfiguration fails loud at load when it is
 self-contained, and every one of these is.
+
+## 27. The install uid lives under the harness home, not beside the spool
+
+`device.uid` is documented as the stable install identity of a machine. It was persisted at
+`<spoolPath>.install-uid`, and `dsh-netguard` — a separate spool, by design — did the same beside
+its own. One host therefore minted two uids and its two OCSF producers disagreed about which device
+they were describing, which breaks every SOC query that groups by device.
+
+The default is now `$DSH_HOME/install-uid`, resolved the way the harness resolves its home, and
+`dsh-netguard` resolves the same path. `fleet.installUidPath` still overrides it, and an explicit
+`fleet.installUid` still skips the file entirely.
+
+A uid an earlier release left beside the spool is read on first run and written through to the new
+path, because an upgrade that re-identifies the host is exactly the loss of continuity the sidecar
+exists to prevent. Where both packages carry a legacy uid, the first to mount seeds the shared file
+and the other adopts it; never migrating would leave the two producers permanently disagreeing,
+which is the defect being fixed.
+
+Persisting is best effort, matching `dsh-netguard`'s helper, which this one had drifted from: a
+directory this process cannot write costs the uid its stability across restarts and is reported,
+but it does not fail the mount. Refusing to mount over an unwritable *sidecar* would cause the
+outage the spool's own write path deliberately refuses to cause, one step earlier. The bare `catch`
+around the read now says what it actually swallows — any read failure, not `ENOENT` alone.
