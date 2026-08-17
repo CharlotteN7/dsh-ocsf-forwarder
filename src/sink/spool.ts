@@ -297,7 +297,7 @@ export class SpoolSink implements Sink {
     // A refused rotation leaves `bytes` past the threshold for every later
     // record, so without the re-check window `rotate` would list the spool
     // directory once per spooled record for as long as the stop condition holds.
-    if (this.bytes >= this.options.maxBytes && this.now() >= this.nextRotationCheckAt) this.rotate()
+    if (this.bytes >= this.options.maxBytes && this.now() >= this.nextRotationCheckAt) this.rotate(this.fd)
   }
 
   /**
@@ -336,6 +336,9 @@ export class SpoolSink implements Sink {
   /**
    * Rename the full file to a fresh generation and reopen an empty one.
    *
+   * @param fd - the open descriptor to close, taken as an argument so the one
+   *   caller's guarantee that it has one is what the type says.
+   *
    * Rotation stops once either bound is reached — `maxGenerations` un-drained
    * generations, or `maxTotalBytes` on disk. The live file then grows past
    * `maxBytes`, which is loud and recoverable; deleting a generation to make
@@ -354,8 +357,7 @@ export class SpoolSink implements Sink {
    * rest of the process's life, which for an audit lane is worse than any
    * rotation outcome.
    */
-  private rotate(): void {
-    if (this.fd === undefined) return
+  private rotate(fd: number): void {
     const reason = this.rotationBlockedBy()
     if (reason !== undefined) {
       this.nextRotationCheckAt = this.now() + ROTATION_RECHECK_MS
@@ -370,7 +372,7 @@ export class SpoolSink implements Sink {
     const current = stamp(this.now())
     this.counter = current === this.lastStamp ? this.counter + 1 : 0
     this.lastStamp = current
-    closeSync(this.fd)
+    closeSync(fd)
     this.fd = undefined
     // A rotation failure is not an outage to wait out before reopening: the
     // live file is still there and still writable in every case but the one

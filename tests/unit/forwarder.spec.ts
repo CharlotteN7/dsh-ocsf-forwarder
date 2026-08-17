@@ -312,4 +312,31 @@ describe('the restricted lane', () => {
     expect(String(restricted.records[0]?.raw_data)).toContain('sk-live-1')
     expect(restricted.records[0]?.metadata.uid).toBe(soc.records[0]?.metadata.uid)
   })
+
+  it('carries no raw_data on a record the forwarder generated rather than observed', () => {
+    const config = testConfig()
+    const soc = new MemorySink()
+    const restricted = new MemorySink()
+    const instance = new Forwarder(testEnvironment(config), config, soc, restricted, () => {})
+    const session = new FakeSession('s1', 0)
+    instance.observe(session, session.append('tool/call', {
+      turn: 1, step: 0, callId: 'c9', name: 'bash', arguments: '{"command":"sleep 900"}',
+    }))
+    instance.dispose(session)
+
+    // The unresolved flush is this plugin's own conclusion; there is no session
+    // payload behind it to duplicate.
+    const flushed = restricted.records.find(record => dshOf(record)['unresolved'] === true)
+    expect(flushed).toBeDefined()
+    expect(flushed?.raw_data).toBeUndefined()
+  })
+})
+
+describe('a session disposed without a single observed event', () => {
+  it('emits nothing, having nothing open and no log time to date it against', () => {
+    const { instance, sink, errors } = forwarder()
+    instance.dispose(new FakeSession('s1', 0))
+    expect(sink.records).toEqual([])
+    expect(errors).toEqual([])
+  })
 })

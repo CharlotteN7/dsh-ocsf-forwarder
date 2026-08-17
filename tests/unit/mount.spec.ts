@@ -1,5 +1,5 @@
 /** The plugin's export shape and what mounting it registers, without booting an agent. */
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -234,6 +234,39 @@ describe('mounting', () => {
     const installUid = readFileSync(join(home, 'install-uid'), 'utf8').trim()
     expect(installUid).toMatch(/^[0-9a-f-]{36}$/)
     expect(spooled(spoolPath)[0]?.device?.uid).toBe(installUid)
+  })
+
+  it('routes a spool warning to the plugin logger, where an operator sees it', async () => {
+    const warnings: string[] = []
+    // Every record rotates, and the one generation allowed is un-drained after
+    // the first, which is the condition the spool exists to be loud about.
+    const { ctx, unload } = await mounted({ spoolMaxBytes: 1, spoolMaxGenerations: 1, statsIntervalMs: 0 })
+    ctx.logger.warn = (message: unknown): void => { warnings.push(String(message)) }
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    subject.events.push({ type: 'turn/end', seq: 1, time: 1_001, data: { turn: 1, reason: { kind: 'completed' } } } as SessionEvent)
+    for (const event of subject.events) emitEvent(ctx, subject, event)
+    await unload()
+    expect(warnings.some(line => line.includes('ocsf-forwarder:') && line.includes('un-drained rotated generations')))
+      .toBe(true)
+  })
+
+  it('reports an install uid it could not persist and still mounts', async () => {
+    const warnings: string[] = []
+    const ctx = new Context()
+    ctx.logger.warn = (message: unknown): void => { warnings.push(String(message)) }
+    ctx.reflect.provide('sessions', { list: () => [] })
+    // A file where the uid's parent directory must be: persisting is best
+    // effort, so this costs the uid its stability and nothing else.
+    writeFileSync(join(home, 'blocked'), '')
+    const fiber = ctx.plugin(plugin, {
+      spoolPath: join(home, 'ocsf', 'session.jsonl'),
+      statsIntervalMs: 0,
+      fleet: { installUidPath: join(home, 'blocked', 'install-uid') },
+    })
+    await fiber
+    await fiber.dispose()
+    expect(warnings.some(line => line.startsWith('ocsf-forwarder:'))).toBe(true)
   })
 
   it('reports its counters to the log, so a broken forwarder does not read as an idle one', async () => {

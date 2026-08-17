@@ -223,13 +223,19 @@ describe('a spool that hits an I/O failure', () => {
     mkdirSync(dir)
     const path = join(dir, 'ocsf.jsonl')
     const warnings: string[] = []
-    const sink = spool(path, { maxBytes: 200, onWarn: message => warnings.push(message) })
+    let clock = 1_700_000_000_000
+    const sink = spool(path, { maxBytes: 200, onWarn: message => warnings.push(message), now: () => clock })
     try {
-      for (let index = 0; index < 3; index += 1) sink.write(record(`S:${String(index)}`))
+      for (let index = 0; index < 3; index += 1) { sink.write(record(`S:${String(index)}`)); clock += 1 }
       // Renaming the live file needs write permission on its directory; nothing
       // else about the spool changes.
       chmodSync(dir, 0o500)
-      for (let index = 3; index < 6; index += 1) sink.write(record(`S:${String(index)}`))
+      for (let index = 3; index < 6; index += 1) {
+        sink.write(record(`S:${String(index)}`))
+        // Past the stand-off each time, so every one of these attempts the
+        // rename and fails, and the warning still comes once.
+        clock += 60_000
+      }
       chmodSync(dir, 0o700)
       for (let index = 6; index < 12; index += 1) sink.write(record(`S:${String(index)}`))
     } finally {
@@ -313,6 +319,41 @@ describe('a spool that hits an I/O failure', () => {
     expect(uidsOnDisk(path)).toEqual(['S:0', 'S:1', 'S:2'])
   })
 
+  it.runIf(asUser)('warns once per outage and lengthens the retry while the failure lasts', () => {
+    const dir = join(home, 'persistently-broken')
+    mkdirSync(dir)
+    const path = join(dir, 'ocsf.jsonl')
+    const warnings: string[] = []
+    let clock = 1_700_000_000_000
+    const sink = spool(path, { maxBytes: 200, onWarn: message => warnings.push(message), now: () => clock })
+    try {
+      sink.write(record('S:0'))
+      chmodSync(path, 0o400)
+      chmodSync(dir, 0o500)
+      sink.write(record('S:1'))
+      // Past the 250 ms the first failed retry opened, so this one retries and
+      // fails too, doubling the delay to 500 ms.
+      clock += 250
+      sink.write(record('dropped-1'))
+      // Inside that 500 ms, so no `open` is attempted at all.
+      clock += 250
+      sink.write(record('dropped-2'))
+      // Past it, so the third attempt is made, fails, and doubles again.
+      clock += 250
+      sink.write(record('dropped-3'))
+      expect(sink.pressure().droppedRecords).toBe(3)
+      // One message for the rotation, one for the dropping. Neither repeats.
+      expect(warnings).toHaveLength(2)
+    } finally {
+      chmodSync(dir, 0o700)
+      chmodSync(path, 0o640)
+    }
+    clock += 1_000
+    sink.write(record('S:2'))
+    sink.close()
+    expect(uidsOnDisk(path)).toEqual(['S:0', 'S:1', 'S:2'])
+  })
+
   it('does not report a deliberately closed spool as a failed one', () => {
     const path = join(home, 'closed.jsonl')
     const warnings: string[] = []
@@ -331,6 +372,24 @@ describe('spool ownership', () => {
     expect(() => spool(path)).toThrow(/already held by pid/)
     first.write(record('a'))
     first.close()
+    expect(uidsOnDisk(path)).toEqual(['a'])
+  })
+
+  it.runIf(process.getuid?.() !== 0)('refuses a lock held by a process it cannot signal', () => {
+    const path = join(home, 'other-uid.jsonl')
+    // pid 1 exists and belongs to another uid, so `kill(pid, 0)` answers EPERM
+    // rather than ESRCH. A lock whose owner this process merely cannot see is
+    // still a live lock.
+    writeFileSync(`${path}.lock`, '1\n')
+    expect(() => spool(path)).toThrow(/already held by pid 1/)
+  })
+
+  it('takes over a lock whose contents do not name a process at all', () => {
+    const path = join(home, 'garbage-lock.jsonl')
+    writeFileSync(`${path}.lock`, 'not-a-pid\n')
+    const sink = spool(path)
+    sink.write(record('a'))
+    sink.close()
     expect(uidsOnDisk(path)).toEqual(['a'])
   })
 
@@ -357,8 +416,9 @@ describe('spool ownership', () => {
     expect(existsSync(`${path}.lock`)).toBe(false)
   })
 
-  it('finds no generations for a spool whose directory does not exist yet', () => {
+  it('finds no generations and no bytes for a spool whose directory does not exist yet', () => {
     expect(rotatedGenerations(join(home, 'absent', 'ocsf.jsonl'))).toEqual([])
+    expect(spoolTotalBytes(join(home, 'absent', 'ocsf.jsonl'))).toBe(0)
   })
 })
 
@@ -384,6 +444,31 @@ describe('the OTLP payload', () => {
     const first = payload.resourceLogs[0]?.scopeLogs[0]?.logRecords[0]
     expect(first?.timeUnixNano).toBe('1700000000000000000')
     expect(first?.attributes.map(attribute => attribute.key)).toEqual(['ocsf.class_uid', 'ocsf.type_uid'])
+  })
+
+  it('stamps a wall-clock time and an unknown severity on a record that carries neither', () => {
+    // The spool is a durable file boundary: a line written by another build, or
+    // by hand, is parsed rather than trusted, so the encoder meets records that
+    // do not have the fields its own producer always sets.
+    const before = Date.now()
+    const malformed = { metadata: { uid: 'x' } } as unknown as OcsfRecord
+    const payload = JSON.parse(JSON.stringify(otlpPayload([malformed], 'dsh-ocsf-forwarder'))) as {
+      resourceLogs: { scopeLogs: { logRecords: { timeUnixNano: string; severityNumber: number }[] }[] }[]
+    }
+    const first = payload.resourceLogs[0]?.scopeLogs[0]?.logRecords[0]
+    // Nanoseconds are past the precision of a double, so the millisecond this
+    // came back as is compared with a millisecond of slack either way.
+    const milliseconds = Number(first?.timeUnixNano) / 1_000_000
+    expect(milliseconds).toBeGreaterThanOrEqual(before - 1)
+    expect(milliseconds).toBeLessThanOrEqual(Date.now() + 1)
+    expect(first?.severityNumber).toBe(0)
+  })
+
+  it('maps a severity OTLP has no number for onto unknown rather than dropping the record', () => {
+    const payload = JSON.parse(JSON.stringify(otlpPayload([{ ...record('a'), severity_id: 7 }], 'p'))) as {
+      resourceLogs: { scopeLogs: { logRecords: { severityNumber: number }[] }[] }[]
+    }
+    expect(payload.resourceLogs[0]?.scopeLogs[0]?.logRecords[0]?.severityNumber).toBe(0)
   })
 })
 
@@ -603,6 +688,28 @@ describe('the shipper', () => {
     writeFileSync(path, `{"broken\n${JSON.stringify(record('b'))}\n`)
     expect(await instance.drain()).toBe(1)
     expect(errors).toHaveLength(1)
+  })
+
+  it('restarts from the beginning when the cursor file holds something that is not an offset', async () => {
+    const { instance, path, cursor } = shipper(async () => 'accepted')
+    writeFileSync(cursor, 'not-a-number')
+    writeFileSync(path, `${JSON.stringify(record('a'))}\n`)
+    expect(instance.cursor()).toBe(0)
+    expect(await instance.drain()).toBe(1)
+  })
+
+  it('contains a corrupt line with no reporter configured, rather than throwing at the timer', async () => {
+    const path = join(home, 'ocsf.jsonl')
+    const resolved = resolveConfig({
+      spoolPath: path,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318' },
+    })
+    // No `onError`: the shipper's own default has to swallow it, because the
+    // caller is a timer with nowhere to throw.
+    const instance = new Shipper(resolved.shipper!, path, async () => 'accepted')
+    writeFileSync(path, `{"broken\n${JSON.stringify(record('b'))}\n`)
+    expect(await instance.drain()).toBe(1)
   })
 
   it('restarts from the beginning when the spool was truncated under it', async () => {

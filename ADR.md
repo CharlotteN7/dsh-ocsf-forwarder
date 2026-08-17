@@ -112,11 +112,10 @@ short path or command is a rainbow-table lookup.
 
 ## 9. Coverage thresholds sit at the level actually reached
 
-`CONVENTIONS.md` §4 adopts 100% per-file coverage. The suite reaches 99.7% lines / 98.2% statements
-/ 97.9% functions / 86.1% branches; the thresholds are pinned below that so a regression fails. The
-residual branch gap is almost entirely the absent half of `field === undefined ? {} : { field }`
-spreads — the optional OCSF attributes — where the covering test would assert that an absent input
-field produces an absent output field. That is a real gap, stated rather than hidden.
+`CONVENTIONS.md` §4 adopts 100% per-file coverage. The thresholds are pinned at whatever the suite
+actually reaches rather than at an aspiration, so a regression fails the gate today instead of
+after the gap is closed. Each is raised only by writing the test that raises it. §34 is why they
+are checked per file rather than in aggregate.
 
 ## 10. The E2E installs the dependency closure
 
@@ -579,3 +578,32 @@ assumed:
 
 `@deepseek-ai/cordis` keeps its exact `4.0.1`. It is the service graph every registration goes
 through; two resolved copies are two graphs, and there is no upstream version to widen towards.
+
+## 34. The coverage gate is per file, because an aggregate one is met by the easy files
+
+The gate was `lines 99 / functions 98 / branches 88 / statements 98` with no `perFile`. Aggregated
+over twenty-one source files, that is a budget the well-covered files pay for the others:
+`src/map/lifecycle.ts` sat at **75.93% branch** behind a comfortably passing 88% aggregate, and
+`src/sink/spool.ts` at 90.9% while holding the defect in §29 — one transient rename failure killing
+the audit sink for the life of the process, silently.
+
+For the record, nobody weakened this. The `100/100/100/100` in the history was set by a docs-only
+planning commit with no tests behind it; the first commit with real tests set branches to 79, and
+it has been ratcheted upward since. The defect was that it was aggregate, not that it was low.
+
+`perFile: true` is now set and every file carries its own entry at the level it reaches. Vitest
+applies the top-level numbers to every file *in addition to* any glob entry rather than instead of
+it, so the top level is the floor a newly added file must clear and the per-file entries ratchet
+each existing file above it.
+
+Closing the gap came first, and the entries record the result rather than excusing it: branches
+went from 88.36% to 97.94% overall and lines to 100%, with thirteen of twenty-one files now at 100
+on all four metrics. `src/map/lifecycle.ts` went from 75.93% to 98.39% branch, `src/sink/otlp.ts`
+from 50% to 100%. No `v8 ignore` was added anywhere. What remains is the absent half of a few
+`field === undefined ? {} : { field }` spreads and of two `error instanceof Error` renderings,
+reachable only from inputs no boundary this plugin has produces.
+
+Removing the tests that closed `lifecycle.ts` demonstrates the difference: the per-file gate fails
+with `branches (87.7%) does not meet "src/map/lifecycle.ts" threshold (98.39%)`, while the
+aggregate it would have been measured against is 95.65% — comfortably past the 88% that was there
+before.

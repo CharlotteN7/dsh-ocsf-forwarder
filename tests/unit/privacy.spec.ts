@@ -71,6 +71,15 @@ describe('argument redaction', () => {
   it('yields nothing when the arguments did not parse', () => {
     expect(redactArguments(undefined, 'digest', key)).toEqual([])
   })
+
+  it('measures an argument with no JSON rendering as empty rather than as the string "undefined"', () => {
+    // A code-mode sub-dispatch hands over an already-parsed argument record, so
+    // a key whose value is `undefined` is reachable without going through
+    // `JSON.parse`.
+    const redacted = redactArguments({ absent: undefined }, 'digest', key)
+    expect(redacted[0]).toMatchObject({ key: 'absent', class: 'json', length: 0 })
+    expect(redacted[0]?.digest).toBe(digest(key, ''))
+  })
 })
 
 describe('command lines', () => {

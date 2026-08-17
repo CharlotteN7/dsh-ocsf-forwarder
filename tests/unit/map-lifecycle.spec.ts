@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { SessionState } from '../../src/correlate.ts'
 import { mapEvent } from '../../src/map/index.ts'
-import { mapSeedBoundary } from '../../src/map/lifecycle.ts'
+import { mapSeedBoundary, mapWorkflow } from '../../src/map/lifecycle.ts'
 import { ACTIVITY, CLASS, SEVERITY, STATUS } from '../../src/ocsf/constants.ts'
 import { testConfig } from './support.ts'
 
@@ -246,6 +246,195 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
 
     const unknown = mapEvent(SESSION, event('schedule/change', { version: 1, operation: 'merged-later' }), new SessionState(), config)
     expect(unknown?.activityId).toBe(ACTIVITY.scheduledJob.other)
+  })
+})
+
+describe('optional attributes', () => {
+  /** One mapping's extension attributes, which is where the optional fields land. */
+  function attributes(type: string, data: unknown, state = new SessionState()): Readonly<Record<string, unknown>> {
+    return mapEvent(SESSION, event(type, data), state, config)?.attributes ?? {}
+  }
+
+  it('omits a turn bracket a start was never seen for, and its cancel and failure fields', () => {
+    const orphan = mapEvent(SESSION, event('turn/end', { turn: 9, reason: { kind: 'completed' } }), new SessionState(), config)
+    expect(orphan?.startTime).toBeUndefined()
+    expect(orphan?.duration).toBeUndefined()
+    expect(orphan?.attributes?.['cancel_cause']).toBeUndefined()
+    expect(orphan?.attributes?.['error_code']).toBeUndefined()
+    expect(orphan?.attributes?.['error_message_digest']).toBeUndefined()
+  })
+
+  it('omits a step bracket a start was never seen for', () => {
+    const orphan = mapEvent(SESSION, event('step/end', { turn: 1, step: 4 }), new SessionState(), config)
+    expect(orphan?.startTime).toBeUndefined()
+    expect(orphan?.duration).toBeUndefined()
+  })
+
+  it('reports only the token counts the usage block actually carried', () => {
+    const none = mapEvent(SESSION, event('assistant/message', { turn: 1, step: 0 }), new SessionState(), config)
+    expect(none?.messageContext).toEqual({ ai_role_id: 2 })
+    expect(none?.attributes?.['reasoning_tokens']).toBeUndefined()
+
+    const inputOnly = mapEvent(
+      SESSION,
+      event('assistant/message', { turn: 1, step: 0, usage: { inputTokens: 12 } }),
+      new SessionState(),
+      config,
+    )
+    expect(inputOnly?.messageContext).toEqual({ ai_role_id: 2, prompt_tokens: 12 })
+
+    const reasoning = attributes('assistant/message', { turn: 1, step: 0, usage: { reasoningTokens: 7 } })
+    expect(reasoning['reasoning_tokens']).toBe(7)
+  })
+
+  it('reads a message whose content is missing or holds no text blocks', () => {
+    const noContent = attributes('user/message', { source: { kind: 'human' } })
+    expect(noContent['text_length']).toBe(0)
+    const noText = attributes('user/message', { source: { kind: 'human' }, content: [{ type: 'image' }] })
+    expect(noText['text_length']).toBe(0)
+  })
+
+  it('reports a context window only when the route named one', () => {
+    expect(attributes('request/context', { provider: 'p', model: 'm' })['context_window']).toBeUndefined()
+    expect(attributes('request/context', { provider: 'p', model: 'm', contextWindow: 128_000 })['context_window'])
+      .toBe(128_000)
+  })
+
+  it('reports an empty capability set for a header with no tools, and no digest with no prompt', () => {
+    const bare = attributes('request/header', { reason: 'initial', header: {} })
+    expect(bare['tool_count']).toBe(0)
+    expect(bare['tools']).toEqual([])
+    expect(bare['system_prompt_digest']).toBeUndefined()
+    expect(bare['model']).toBeUndefined()
+
+    const named = attributes('request/header', { header: { tools: [{}], config: { model: 'deepseek-chat' } } })
+    expect(named['tools']).toEqual(['unknown'])
+    expect(named['model']).toBe('deepseek-chat')
+    expect(named['reason']).toBe('unknown')
+  })
+
+  it('reports a hook matcher, exit code and duration only when the payload carried them', () => {
+    expect(attributes('hook/invoked', { point: 'PreToolUse', handlerId: 'h1' })['matcher']).toBeUndefined()
+    expect(attributes('hook/invoked', { point: 'PreToolUse', handlerId: 'h1', matcher: 'Bash' })['matcher']).toBe('Bash')
+
+    const bare = mapEvent(SESSION, event('hook/result', { point: 'PreToolUse', handlerId: 'h1', decision: 'allow' }), new SessionState(), config)
+    expect(bare?.process?.exit_code).toBeUndefined()
+    expect(bare?.duration).toBeUndefined()
+
+    const timed = mapEvent(
+      SESSION,
+      event('hook/result', { point: 'PreToolUse', handlerId: 'h1', decision: 'allow', exitCode: 0, durationMs: 12 }),
+      new SessionState(),
+      config,
+    )
+    expect(timed?.process?.exit_code).toBe(0)
+    expect(timed?.duration).toBe(12)
+  })
+
+  it('reports a descriptor version only when the descriptor carried one', () => {
+    expect(attributes('subagent/descriptor', { mode: 'one-shot' })['descriptor_version']).toBeUndefined()
+    expect(attributes('subagent/descriptor', { mode: 'one-shot', version: 2 })['descriptor_version']).toBe(2)
+  })
+
+  it('omits a workflow member seq, child id and name when the event names none', () => {
+    const bare = mapEvent(SESSION, event('tool-workflow/run-start', { runId: 'w1' }), new SessionState(), config)
+    expect(bare?.statusDetail).toBeUndefined()
+    expect(bare?.delegation).toBeUndefined()
+    expect(bare?.attributes?.['member_seq']).toBeUndefined()
+    expect(bare?.attributes?.['child_session_id']).toBeUndefined()
+    expect(bare?.attributes?.['name']).toBeUndefined()
+
+    const full = attributes('tool-workflow/agent-end', { runId: 'w1', outcome: 'completed', seq: 2, name: 'reviewer' })
+    expect(full['member_seq']).toBe(2)
+    expect(full['name']).toBe('reviewer')
+  })
+
+  it('takes the lifecycle activity of a workflow event type it does not recognise', () => {
+    const mapping = mapEvent(SESSION, event('tool-workflow/run-start', { runId: 'w1' }), new SessionState(), config)
+    expect(mapping?.activityId).toBe(ACTIVITY.applicationLifecycle.start)
+  })
+
+  it('omits every compaction field the event did not carry, and correlates on nothing it cannot key', () => {
+    const bare = mapEvent(SESSION, event('compaction/start', {}), new SessionState(), config)
+    expect(bare?.correlationUid).toBeUndefined()
+    expect(bare?.statusDetail).toBeUndefined()
+    expect(bare?.attributes?.['compaction_id']).toBeUndefined()
+    expect(bare?.attributes?.['shadowed_tokens']).toBeUndefined()
+    expect(bare?.attributes?.['shadowed_count']).toBeUndefined()
+    expect(bare?.attributes?.['shadowed_start']).toBeUndefined()
+    expect(bare?.attributes?.['summary_digest']).toBeUndefined()
+
+    const keyed = mapEvent(SESSION, event('compaction/end', { compactionId: 'k1' }), new SessionState(), config)
+    expect(keyed?.correlationUid).toBe(`${SESSION}:compaction:k1`)
+
+    const ranged = mapEvent(SESSION, event('compaction/prune', { shadowedRange: {} }), new SessionState(), config)
+    expect(ranged?.correlationUid).toBe(`${SESSION}:compaction:range:0-0`)
+    expect(ranged?.attributes?.['shadowed_start']).toBe(0)
+  })
+
+  it('reads a schedule id from the bare payload when there is no schedule record, and grades an unknown operation', () => {
+    const dispatched = mapEvent(SESSION, event('schedule/change', { operation: 'dispatch', id: 's2' }), new SessionState(), config)
+    expect(dispatched?.activityId).toBe(ACTIVITY.scheduledJob.update)
+    expect(dispatched?.job).toEqual({ name: 's2', uid: 's2' })
+
+    const unknown = mapEvent(SESSION, event('schedule/change', {}), new SessionState(), config)
+    expect(unknown?.activityId).toBe(ACTIVITY.scheduledJob.other)
+    expect(unknown?.job).toEqual({ name: 'unknown', uid: 'unknown' })
+  })
+
+  it('omits the turn and step of an unknown event that names neither', () => {
+    const bare = attributes('someone-elses-plugin/event', {})
+    expect(bare['turn']).toBeUndefined()
+    expect(bare['step']).toBeUndefined()
+  })
+
+  it('names no fork on a seed boundary for a session that was not forked', () => {
+    expect(mapSeedBoundary(SESSION, 4, undefined).attributes?.['forked_from']).toBeUndefined()
+    expect(mapSeedBoundary(SESSION, 4, 'parent-1').attributes?.['forked_from']).toBe('parent-1')
+  })
+})
+
+describe('payloads missing the fields a mapper reads', () => {
+  /**
+   * Every lifecycle event type, with an empty payload. None of these are
+   * droppable: an event whose payload a future build reshapes must still
+   * produce a record, with the documented default rather than a guess.
+   */
+  const bare: readonly [string, Record<string, unknown>][] = [
+    ['turn/start', { turn: 0, phase: 'start' }],
+    ['turn/end', { turn: 0, end_reason: 'unknown' }],
+    ['step/start', { turn: 0, step: 0 }],
+    ['step/end', { turn: 0, step: 0 }],
+    ['assistant/message', { turn: 0, step: 0, text_length: 0 }],
+    ['user/message', { message_source: 'unknown', text_length: 0 }],
+    ['request/context', { provider: 'unknown', model: 'unknown' }],
+    ['request/header', { reason: 'unknown', tool_count: 0 }],
+    ['hook/invoked', { hook_point: 'unknown', handler_id: 'unknown', dialect: 'unknown', turn: 0 }],
+    ['hook/result', { hook_point: 'unknown', handler_id: 'unknown', decision: 'unknown', turn: 0 }],
+    ['subagent/descriptor', { subagent_mode: 'unknown', subagent_provider: 'unknown' }],
+    ['tool-workflow/run-end', { run_id: 'unknown' }],
+    ['schedule/change', { schedule_id: 'unknown', operation: 'unknown' }],
+    ['compaction/prune', { event: 'compaction/prune' }],
+  ]
+
+  it.each(bare)('records %s with its documented defaults', (type, expected) => {
+    const mapping = mapEvent(SESSION, event(type, {}), new SessionState(), config)
+    expect(mapping).toBeDefined()
+    expect(mapping?.attributes).toMatchObject(expected)
+  })
+
+  it('grades an unpaired turn end and an empty turn payload without inventing a duration', () => {
+    const mapping = mapEvent(SESSION, event('turn/end', {}), new SessionState(), config)
+    expect(mapping?.statusId).toBe(STATUS.unknown)
+    expect(mapping?.severityId).toBe(SEVERITY.informational)
+    expect(mapping?.correlationUid).toBe(`${SESSION}:turn:0`)
+  })
+
+  it('gives a workflow event type it does not know the update activity', () => {
+    // `mapEvent` routes only the four shipped types here; this is the
+    // merge-extensible fallthrough a plugin-added workflow event would take.
+    expect(mapWorkflow('tool-workflow/step-retried', SESSION, { time: 1, data: { runId: 'w1' } }).activityId)
+      .toBe(ACTIVITY.applicationLifecycle.update)
   })
 })
 

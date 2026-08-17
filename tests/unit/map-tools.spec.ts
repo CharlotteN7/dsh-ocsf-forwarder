@@ -321,6 +321,140 @@ describe('code-mode sub-dispatch', () => {
     expect(settle?.statusId).toBe(STATUS.failure)
     expect(settle?.duration).toBe(50)
   })
+
+  it('carries no subject object for a sub-call whose class defines none', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch-start',
+      seq: 5,
+      time: 2_000,
+      data: { subCallId: 'sub-1', name: 'mystery_tool', arguments: { a: 1 } },
+    }, new SessionState(), testConfig())
+    expect(mapping?.classUid).toBe(CLASS.apiActivity)
+    expect(mapping?.process).toBeUndefined()
+    expect(mapping?.file).toBeUndefined()
+    expect(mapping?.httpRequest).toBeUndefined()
+    expect(mapping?.api?.operation).toBe('tool:mystery_tool')
+  })
+
+  it('classifies a sub-call that hands the task to an external harness as one', () => {
+    const config = testConfig({ delegationTools: { handoff: 'codex' } })
+    const state = new SessionState()
+    const start = mapEvent(SESSION, {
+      type: 'tool/code-dispatch-start',
+      seq: 5,
+      time: 2_000,
+      data: { subCallId: 'sub-1', name: 'handoff', arguments: { prompt: 'go' } },
+    }, state, config)
+    expect(start?.severityId).toBe(SEVERITY.high)
+    expect(start?.process?.name).toBe('codex')
+
+    const settle = mapEvent(SESSION, {
+      type: 'tool/code-dispatch',
+      seq: 6,
+      time: 2_050,
+      data: { subCallId: 'sub-1', isError: false },
+    }, state, config)
+    expect(settle?.attributes?.['delegation_provider']).toBe('codex')
+  })
+
+  it('names an unnamed sub-call unknown rather than dropping its settling record', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch',
+      seq: 6,
+      time: 2_050,
+      data: { subCallId: 'orphan', isError: false },
+    }, new SessionState(), testConfig())
+    expect(mapping?.attributes?.['tool']).toBe('unknown')
+    expect(mapping?.attributes?.['unpaired']).toBe(true)
+  })
+
+  it('carries the http subject of a sub-call whose class defines one', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch-start',
+      seq: 5,
+      time: 2_000,
+      data: { subCallId: 'sub-1', name: 'web_fetch', arguments: { url: 'https://example.test/a' } },
+    }, new SessionState(), testConfig())
+    expect(mapping?.httpRequest?.url?.url_string).toBe('https://example.test')
+  })
+})
+
+describe('payloads a mapper has to read defensively', () => {
+  it('records that a sub-dispatch arrived with arguments that are not an object', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch-start',
+      seq: 5,
+      time: 2_000,
+      data: { subCallId: 'sub-1', name: 'write', arguments: 42 },
+    }, new SessionState(), testConfig())
+    expect(mapping?.attributes?.['arguments_parse_error']).toBe('tool arguments are not a JSON object')
+    expect(mapping?.attributes?.['arguments']).toEqual([])
+  })
+
+  it('reports a sub-dispatch payload that names no sub-call, rather than inventing one', () => {
+    const state = new SessionState()
+    expect(mapEvent(SESSION, { type: 'tool/code-dispatch-start', seq: 1, time: 1, data: { name: 'write' } }, state, testConfig()))
+      .toBeUndefined()
+    expect(mapEvent(SESSION, { type: 'tool/code-dispatch', seq: 1, time: 1, data: { name: 'write' } }, state, testConfig()))
+      .toBeUndefined()
+    expect(mapEvent(SESSION, { type: 'tool/result', seq: 1, time: 1, data: {} }, state, testConfig())).toBeUndefined()
+  })
+
+  it('defaults a sub-dispatch that names no parent or root call, and takes the call ids as its own', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch-start',
+      seq: 5,
+      time: 2_000,
+      data: { subCallId: 'sub-1', name: 'read', arguments: { file_path: '/tmp/x' } },
+    }, new SessionState(), testConfig())
+    expect(mapping?.attributes?.['parent_call_id']).toBe('')
+    expect(mapping?.attributes?.['root_call_id']).toBe('')
+  })
+
+  it('reads a tool call that names no turn or step as turn 0 step 0', () => {
+    const mapping = mapEvent(
+      SESSION,
+      { type: 'tool/call', seq: 1, time: 1, data: { callId: 'c1', name: 'bash', arguments: '{}' } },
+      new SessionState(),
+      testConfig(),
+    )
+    expect(mapping?.attributes?.['turn']).toBe(0)
+    expect(mapping?.attributes?.['step']).toBe(0)
+  })
+
+  it('carries the failure identity of a tool result that reported an error object', () => {
+    const config = testConfig()
+    const state = new SessionState()
+    mapEvent(SESSION, call('bash', { command: 'false' }), state, config)
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/result',
+      seq: 2,
+      time: 1_100,
+      data: { message: { source: { callId: 'call-1' } }, error: { name: 'ToolError', code: 'ENOENT' } },
+    }, state, config)
+    expect(mapping?.statusDetail).toBe('ToolError: ENOENT')
+  })
+
+  it('gives a settling record with no call and no subject an http_request, so its class stays valid', () => {
+    const mapping = mapEvent(SESSION, {
+      type: 'tool/code-dispatch',
+      seq: 6,
+      time: 2_050,
+      data: { subCallId: 'lost', name: 'web_fetch', isError: false },
+    }, new SessionState(), testConfig())
+    expect(mapping?.classUid).toBe(CLASS.httpActivity)
+    expect(mapping?.httpRequest).toEqual({ http_method: 'GET' })
+  })
+
+  it('carries no api object on an unresolved call whose class defines none', () => {
+    const mapping = mapUnresolvedCall(SESSION, {
+      callId: 'c', name: 'bash', toolClass: 'process-launch', time: 0, seq: 1, turn: 0, step: 0,
+    }, 5)
+    expect(mapping.api).toBeUndefined()
+    expect(mapUnresolvedCall(SESSION, {
+      callId: 'c', name: 'mystery', toolClass: 'api', time: 0, seq: 1, turn: 0, step: 0,
+    }, 5).api?.operation).toBe('tool:mystery')
+  })
 })
 
 describe('unresolved calls', () => {

@@ -112,4 +112,52 @@ describe('authorization state', () => {
     const mapping = mapEvent(SESSION, { type: 'permission/preset', seq: 1, time: 1, data: { preset: 'read-only' } }, new SessionState(), config)
     expect(mapping?.privileges).toEqual(['preset:read-only'])
   })
+
+  it('names the setting unknown rather than guessing when the payload carries no value', () => {
+    const mapping = mapEvent(SESSION, { type: 'sandbox/mode', seq: 1, time: 1, data: {} }, new SessionState(), config)
+    expect(mapping?.privileges).toEqual(['sandbox:unknown'])
+    expect(mapping?.attributes?.['value']).toBe('unknown')
+    expect(mapping?.attributes?.['source']).toBeUndefined()
+  })
+})
+
+describe('payloads an approval mapper has to read defensively', () => {
+  it('reports a decision with no request id, rather than pairing it with something', () => {
+    expect(mapEvent(SESSION, { type: 'approval/decided', seq: 1, time: 1, data: {} }, new SessionState(), config))
+      .toBeUndefined()
+  })
+
+  it('names the tool unknown for a question that did not say which tool it was about', () => {
+    const mapping = mapEvent(SESSION, { type: 'approval/asked', seq: 1, time: 1, data: { id: 'a1' } }, new SessionState(), config)
+    expect(mapping?.privileges).toEqual(['tool:unknown'])
+    expect(mapping?.attributes?.['call_id']).toBeUndefined()
+    expect(mapping?.attributes?.['reason_digest']).toBeUndefined()
+  })
+
+  it('grades an outcome outside the closed vocabulary as other, at an unknown severity', () => {
+    const state = new SessionState()
+    mapEvent(SESSION, asked('a1', 1_000), state, config)
+    const mapping = mapEvent(SESSION, decided('a1', 'deferred-by-a-plugin', 1_100), state, config)
+    expect(mapping?.statusId).toBe(STATUS.other)
+    expect(mapping?.severityId).toBe(SEVERITY.unknown)
+    expect(mapping?.statusDetail).toBe('deferred-by-a-plugin')
+  })
+
+  it('reads a decision that names no outcome as unknown', () => {
+    const state = new SessionState()
+    mapEvent(SESSION, asked('a1', 1_000), state, config)
+    const mapping = mapEvent(SESSION, { type: 'approval/decided', seq: 11, time: 1_100, data: { id: 'a1' } }, state, config)
+    expect(mapping?.attributes?.['outcome']).toBe('unknown')
+  })
+
+  it('carries the call id of the question onto the decision, and none when the question had none', () => {
+    const withCall = new SessionState()
+    mapEvent(SESSION, asked('a1', 1_000, { callId: 'c1' }), withCall, config)
+    expect(mapEvent(SESSION, decided('a1', 'rejected', 1_100), withCall, config)?.attributes?.['call_id']).toBe('c1')
+
+    const without = new SessionState()
+    mapEvent(SESSION, asked('a2', 1_000), without, config)
+    expect(mapEvent(SESSION, decided('a2', 'rejected', 1_100), without, config)?.attributes?.['call_id'])
+      .toBeUndefined()
+  })
 })
