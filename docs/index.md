@@ -21,6 +21,10 @@ nav_order: 1
 - Emits a periodic **heartbeat** carrying its counters, the live session count and the delivery
   cursor, so a host that goes quiet is distinguishable from one that is idle. See
   [Heartbeat](shipping.md#heartbeat).
+- Chains every spooled record into an OCSF `record_integrity` attestation, so a record edited or
+  deleted after the fact is detectable — and ships `dsh-ocsf-verify` to check it. See
+  [Tamper-evidence](integrity.md), which also states plainly what the chain does **not** protect
+  against.
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.
 - Keeps raw values out of the SOC lane: keyed digests, value classifications, and lengths instead.
   File paths, tool names, executable names, and bounded enumerations are the exceptions, and they
@@ -34,7 +38,8 @@ nav_order: 1
   sink. The plugin registers no waterfall listener either, so it cannot change a tool call, an
   approval decision, or a model request.
 - **It is not a containment boundary.** It runs in the agent's process at the agent's uid. An agent
-  that can run `bash` can delete or rewrite the spool. What the plugin buys you is that records
-  leave the host promptly when a shipper is configured, and that a gap is visible: `metadata.sequence`
-  holes per session, and a shipper cursor that stopped advancing.
+  that can run `bash` can delete or rewrite the spool — and can recompute the hash chain over what
+  it wrote, because the algorithm is published. What the plugin buys you is that records leave the
+  host promptly when a shipper is configured, and that a gap is visible: the hash chain's entry
+  numbering, `metadata.sequence` holes per session, and a shipper cursor that stopped advancing.
 - It ships no detection content, no alerting, and no secret detectors.

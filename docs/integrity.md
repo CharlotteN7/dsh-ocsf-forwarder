@@ -1,0 +1,196 @@
+---
+title: Tamper-evidence
+nav_order: 7
+---
+
+# Tamper-evidence: the `record_integrity` profile
+
+[← dsh-ocsf-forwarder docs](index.md)
+
+Every spooled record carries an OCSF 1.9.0 `record_integrity` attestation: the SHA-256 fingerprint
+of the record itself, plus the uid and fingerprint of the record written before it. The chain lets
+a reader tell whether the spool they are holding is the spool that was written.
+
+**Read [what this does not protect against](#what-the-chain-does-not-protect-against) before you
+rely on it.** It is a shorter list than the marketing for this kind of feature usually admits.
+
+## What one record carries
+
+```json
+{
+  "class_uid": 1007,
+  "metadata": { "uid": "01JB0SESSION:8", "profiles": ["ai_operation", "cloud", "osint", "record_integrity"] },
+  "attestation_list": [
+    {
+      "uid": "7a1f0c5e-6b2d-4c8a-9f31-2d5b8e0a1c74:41",
+      "chain_uid": "7a1f0c5e-6b2d-4c8a-9f31-2d5b8e0a1c74",
+      "prev_event": {
+        "uid": "01JB0SESSION:7",
+        "type_uid": 100701,
+        "fingerprint": { "value": "9d1c…", "algorithm_id": 3, "encoding_id": 1 }
+      },
+      "fingerprint": { "value": "4b77…", "algorithm_id": 3, "encoding_id": 1 }
+    }
+  ]
+}
+```
+
+| Attribute | Value |
+|---|---|
+| `attestation.uid` | `<chain_uid>:<entry index>`, counting from `0`. The index is what makes a deletion visible: entries are consecutive within a chain. |
+| `attestation.chain_uid` | A UUID minted per process **per lane**. The SOC and restricted lanes are separate files carrying different records, so each has its own chain; a link that pointed into the other file could not be checked from the file it is in. |
+| `attestation.fingerprint` | SHA-256 (`algorithm_id: 3`) of this record's canonical serialization, hex (`encoding_id: 1`). |
+| `attestation.prev_event` | The previous record's `metadata.uid`, `type_uid`, and fingerprint. Absent on the chain's genesis entry, and only there. |
+| `metadata.profiles` | Carries `record_integrity`, because every OCSF class is `additionalProperties: false` and an attribute whose profile is undeclared fails validation exactly as an undefined one does. |
+
+`authority_uid` and `signatures` are **not** emitted. This producer holds no signing credential, so
+there is no identity to bind and none to name; the installation that wrote the record is already in
+`device.uid`, which is inside the hashed content. The object's constraint
+`at_least_one: [fingerprint, signatures]` is met by the fingerprint.
+
+## Canonicalisation, exactly
+
+A third party must be able to recompute every fingerprint without this package. The rule is:
+
+1. Take the record **as it is on the line**, parsed as JSON.
+2. In its single `attestation_list` entry, remove `fingerprint` and `signatures`. Remove nothing
+   else: `uid`, `chain_uid`, and the whole `prev_event` object stay, which is why the link to the
+   predecessor cannot be edited without invalidating the fingerprint.
+3. Serialize the whole record with **RFC 8785 (JSON Canonicalization Scheme)**: object keys sorted
+   by UTF-16 code unit, no insignificant whitespace, strings and numbers rendered as ECMAScript
+   `JSON.stringify` renders them.
+4. Encode that text as UTF-8, take SHA-256, and render it as lower-case hex.
+
+That string is `attestation.fingerprint.value`. The next record's `prev_event.fingerprint.value` is
+the same string, copied.
+
+Two details a verifier must not get wrong:
+
+- **The line's own byte order is not the canonical order.** The spool is written with plain
+  `JSON.stringify`, in insertion order. Parse the line and re-serialize it canonically; do not hash
+  the line.
+- **The whole record is covered**, including `metadata.logged_time`, the `unmapped.dsh` extension
+  object, and — in the restricted lane — `raw_data`. Nothing is excluded but the two attestation
+  fields named above.
+
+### A reference verifier, in something that is not this package
+
+```python
+import hashlib, json, sys
+
+def canonical(value):                      # RFC 8785, sufficient for these records
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+prev = None
+for path in sys.argv[1:]:                  # generations oldest first, then the live file
+    for number, line in enumerate(open(path, encoding="utf-8"), start=1):
+        record = json.loads(line)
+        attestation, = record["attestation_list"]
+        claimed = attestation["fingerprint"]["value"]
+        bare = {k: v for k, v in attestation.items() if k not in ("fingerprint", "signatures")}
+        covered = dict(record, attestation_list=[bare])
+        actual = hashlib.sha256(canonical(covered).encode("utf-8")).hexdigest()
+        if actual != claimed:
+            sys.exit(f"{path}:{number} altered")
+        if prev is not None and attestation.get("prev_event", {}).get("fingerprint", {}).get("value") != prev:
+            sys.exit(f"{path}:{number} broken link")
+        prev = claimed
+print("intact")
+```
+
+Python's `json.dumps` matches RFC 8785 for these records: every number in them is an integer, and
+every object key is ASCII, which is where its number formatting and its code-point key ordering
+would otherwise differ from ECMAScript's. A verifier for records from another producer should use a
+real JCS implementation.
+
+## Chains, rotation, and gaps
+
+A chain is **one process writing one file**. It survives rotation: renaming the live file to a
+generation does not end a chain, so a spool plus its generations verify as one continuous sequence
+when they are read oldest-first. It does **not** survive a restart: the next process mints a new
+`chain_uid` and starts again at entry `0`. Carrying a chain across restarts would mean trusting a
+state file that is writable by exactly the party the chain is supposed to be evidence against, and
+a genesis entry is not weaker than a link to a state file anyone can rewrite.
+
+A verifier therefore distinguishes three things a spool file can show:
+
+| What it sees | What it means |
+|---|---|
+| A chain whose first entry is `0`, with no `prev_event` | A process started here. Nothing is missing before it. |
+| A chain whose first entry is `N > 0`, with a `prev_event` | Entries `0…N-1` are not in this input. Normal after the shipper drained and unlinked a generation; also what deleting the front of a spool looks like. The spool alone cannot tell those apart — the shipper's cursor can, and so can the SIEM, which already has the delivered entries. |
+| An interior jump from entry `N` to `N+2`, or a `prev_event` that does not match the record before it | Records were removed, reordered, or edited. This is a break. |
+
+Because a whole chain can be deleted without leaving a trace *in the spool*, the count of chains is
+not evidence of anything by itself. What makes deletion visible is the copy that already left the
+host: configure a shipper.
+
+## What the chain does not protect against
+
+**The agent this plugin observes.** The plugin runs in the agent's process at the agent's uid. An
+agent that can run `bash` can delete the spool, rewrite it, and recompute a consistent chain over
+the result — the algorithm is published on this page precisely so that anyone can recompute it, and
+that includes the attacker. No arrangement of hashing inside this process changes that; a key held
+in the same process is a key the same attacker reads.
+
+This is the same honesty the [`privacy.hmacKey`](configuration.md) setting demands. That key exists
+so a SOC can join on equal values without seeing them, and its secrecy is what stops a dictionary
+attack on the digests. Here there is nothing to hide, only something to bind — so the fingerprints
+are **unkeyed**, and an HMAC would have bought no resistance against the one attacker who matters
+while destroying the property that anyone can verify the chain.
+
+What the chain does buy:
+
+- **A later edit is detected.** Anything that changes a spooled record — an editor, a log-mangling
+  script, a corrupted copy, a helpful "cleanup", a second process that got past the lock file — is
+  visible at the record it touched and at the record after it.
+- **A deletion is detected**, by the gap in consecutive chain entries, which is stronger than the
+  per-session `metadata.sequence` gap detector because it covers every record in the file including
+  heartbeats and records from other sessions.
+- **Records already off the host become anchors.** The SIEM holds fingerprints for everything
+  shipped. Any later rewrite of the spool must either keep those records byte-identical or produce
+  a chain that disagrees with what the SIEM already has. The undetectable-tampering window is the
+  time between a record being written and being delivered — one `flushIntervalMs`, five seconds by
+  default.
+- **Nothing about the agent's honesty.** A record that was never written is not missing from a
+  chain that never contained it. This is tamper-evidence for the audit trail, not attestation of
+  the agent's behaviour.
+
+## Verifying a spool
+
+```sh
+dsh-ocsf-verify /var/log/dsh/ocsf.jsonl
+```
+
+The command is installed with the package (`node_modules/.bin/dsh-ocsf-verify`). It takes one or
+more spool paths, verifies each together with its rotated generations oldest-first, and exits `0`
+when the input is intact, `1` when it is not, and `2` when it could not be read. `--json` prints the
+whole report — every finding with its file, line, and record uid — for a scheduled check.
+
+```
+3241 record(s) in 2 file(s), 3241 attested, 1 chain(s)
+  chain 7a1f0c5e-…: 3241 record(s), entries 0-3240, from its genesis entry
+INTACT: every record hashes to its own fingerprint and every link matches.
+```
+
+The finding kinds are `altered`, `broken-link`, `missing-records`, `out-of-order`, `unattested`,
+`malformed`, and `unparsable`. An empty input reports `NOT VERIFIED` and exits `1`: an audit tool
+that exits `0` on a file with nothing in it reports the absence of evidence as evidence.
+
+The same check is available programmatically — `verifyRecords`, `formatReport`, and `spoolFiles` are
+exported from the package root — and the algorithm is small enough that the reference
+implementation above is a reasonable thing to run instead.
+
+## Cost
+
+The chain runs synchronously on the agent's event loop, once per record, in both lanes.
+
+| | Measured |
+|---|---|
+| Added time per record | **~29 µs** (one canonical serialization plus one SHA-256), against ~4 µs for the `JSON.stringify` the spool already did |
+| Added bytes per record | **+391 bytes**, on a mean record of 1369 bytes — **+29%** on the spool and on everything shipped |
+
+Measured over 20 000 records from a real forwarder run with
+`pnpm exec tsx scripts/measure-attestation-cost.ts`; the number moves with the machine, not with
+the record. The size cost is the reason `integrity.attest: false` exists. The time cost is not:
+29 µs a record is two orders of magnitude below the 2.7 ms per record that a filesystem check on
+this same path once cost, and that check was measurable in the agent's response time.

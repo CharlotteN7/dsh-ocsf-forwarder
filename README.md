@@ -23,6 +23,8 @@ complete event → OCSF mapping table for all 44 session event types.
 - Emits a periodic **heartbeat** carrying counters, live session count and delivery cursor, so a
   host that goes quiet is distinguishable from one that is idle. A spool that has stopped writing
   reports itself there at `severity_id: 5`, with the count of what it dropped.
+- Chains every spooled record with the OCSF **`record_integrity`** profile, and ships
+  `dsh-ocsf-verify` to check the chain.
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.
 - Keeps raw values out of the SOC lane: keyed digests, value classifications and lengths instead.
 
@@ -33,9 +35,10 @@ complete event → OCSF mapping table for all 44 session event types.
   and refuse the entire session. All durable output goes to our own sink, and the plugin registers
   no waterfall listener, so it cannot change a tool call, an approval decision or a model request.
 - **It is not a containment boundary.** It runs in the agent's process at the agent's uid; an agent
-  that can run `bash` can delete or rewrite the spool. What it buys you is that records leave the
-  host promptly and that a gap is *visible* — `metadata.sequence` holes per session, and a shipper
-  cursor that stopped advancing.
+  that can run `bash` can delete or rewrite the spool — and can recompute the hash chain over what
+  it wrote, because the algorithm is published. What it buys you is that records leave the host
+  promptly and that a gap is *visible* — the chain's entry numbering, `metadata.sequence` holes per
+  session, and a shipper cursor that stopped advancing.
 - It ships no detection content, no alerting and no secret detectors.
 
 [The full scope statement →](https://charlotten7.github.io/dsh-ocsf-forwarder/)
@@ -90,6 +93,23 @@ delete an un-drained generation rather than silently discarding unacknowledged e
 
 [Splunk and OTLP setup →](https://charlotten7.github.io/dsh-ocsf-forwarder/shipping.html) ·
 [Delivery and failure modes →](https://charlotten7.github.io/dsh-ocsf-forwarder/operations.html)
+
+## Tamper-evidence
+
+Every record carries an OCSF 1.9.0 `record_integrity` attestation: the SHA-256 fingerprint of the
+record, plus the uid and fingerprint of the record before it. Editing, deleting, or reordering a
+spooled record breaks the chain at that record and at the one after it.
+
+```sh
+dsh-ocsf-verify /var/log/dsh/ocsf.jsonl   # exits 0 intact, 1 broken, 2 unreadable
+```
+
+The fingerprints are **unkeyed**, so anyone can recompute them — which is the point, and which also
+means the chain does not resist the agent it observes. What it detects is a later edit by anything
+that does not recompute the chain, and it makes every record already shipped to a SIEM an anchor
+the spool can be checked against.
+
+[The canonicalisation, the threat model, and the cost →](https://charlotten7.github.io/dsh-ocsf-forwarder/integrity.html)
 
 ## Running it with `dsh-netguard`
 

@@ -607,3 +607,91 @@ Removing the tests that closed `lifecycle.ts` demonstrates the difference: the p
 with `branches (87.7%) does not meet "src/map/lifecycle.ts" threshold (98.39%)`, while the
 aggregate it would have been measured against is 95.65% — comfortably past the 88% that was there
 before.
+
+## 35. The hash chain is unkeyed, spans a process rather than a session, and says so
+
+**Context.** The README already concedes that an agent which can run `bash` can delete or rewrite
+the spool. OCSF 1.9.0 published the `record_integrity` profile on 2026-08-03: an
+`attestation_list` on `base_event`, so every class this plugin emits accepts it, and no producer is
+known to emit it yet.
+
+**What the schema actually says**, read from
+`schema.ocsf.io/api/1.9.0/{profiles/record_integrity,objects/attestation,objects/prev_event,objects/fingerprint}`:
+
+- The fingerprint covers "the entire event, including the attestation's own `authority_uid`,
+  `chain_uid`, and `prev_event` attributes, and excluding only the attestation's `fingerprint` and
+  `signatures`". That is what makes the chain a chain: the predecessor's fingerprint is inside the
+  hashed content, so editing a record breaks the record after it too.
+- `attestation.uid` "distinguishes an individual attestation, such as a single entry within a
+  tamper-evident chain, from the chain as a whole"; `chain_uid` identifies "the append-only chain,
+  such as a forensic or audit log, that this event belongs to".
+- `prev_event.uid` is the predecessor's `metadata.uid` and is **required**; `type_uid` "directs a
+  consumer to the event class, and therefore the table or store, where the previous event resides".
+- `fingerprint.value` is required and `fingerprint.algorithm_id` is required. `algorithm` and
+  `encoding` are optional strings defined as the caption of their id.
+- The `attestation` object constrains `at_least_one: [fingerprint, signatures]`.
+
+**Where the brief was wrong.** "Every attestation produced during a single agent session shares one
+`chain_uid`" is an *example* inside the `chain_uid` description, not a rule the schema states — the
+rule is that the uid identifies the append-only log and is "stable for the lifetime of the chain".
+A per-session chain would also be the wrong unit here: this plugin's spool interleaves every live
+session plus heartbeats that belong to no session, so per-session chains would leave the
+interleaving order and the heartbeats uncovered, and would not detect a whole session being cut out
+of a file. A chain is therefore **one process writing one file**.
+
+**Decision.** Chain per process per lane. `chain_uid` is a UUID minted at mount, `attestation.uid`
+is `<chain_uid>:<index>` counting from zero, and the SOC and restricted lanes get separate chains
+because they are separate files carrying different records — a link pointing into the other file
+could not be checked from the file it is in.
+
+**The fingerprints are unkeyed SHA-256, and this is the load-bearing decision.** An HMAC keyed the
+way `privacy.hmacKey` is would be worse in both directions. The attacker the chain is nominally
+against is the agent, which runs at our uid and reads the key out of our process; and a keyed chain
+cannot be verified by anyone who does not hold the key, which forfeits the only property that makes
+tamper-evidence useful to an auditor. `privacy.hmacKey` is keyed because its job is different: the
+secret is what stops a dictionary attack recovering a digested value. Here there is nothing to hide
+and only something to bind.
+
+So the honest claim, which `docs/integrity.md` and the README both make in these words, is: the
+chain detects a later edit, deletion, or reordering by anything that does not recompute the chain,
+and it turns every record already shipped into an anchor the spool can be checked against — leaving
+an undetectable-tampering window of one `flushIntervalMs`. It does **not** stop the agent from
+writing a consistent forged chain. Overclaiming here would have been worse than not shipping it.
+
+**`authority_uid` and `signatures` are omitted.** Both are "recommended", and both would be a
+claim we cannot back: this producer holds no signing credential, so there is no identity to bind
+and none to name. The installation that wrote the record is already in `device.uid`, inside the
+hashed content. `algorithm` and `encoding` are omitted for a smaller reason — they are the captions
+of ids the record already carries, and there are two fingerprint objects per record.
+
+**Canonicalisation is RFC 8785 (JCS)**, documented in `docs/integrity.md` precisely enough to
+reimplement: parse the line, drop `fingerprint` and `signatures` from the single attestation, sort
+object keys by UTF-16 code unit, no whitespace, `JSON.stringify` number and string rendering, UTF-8,
+SHA-256, lower-case hex. The spooled line itself is *not* canonical — it is written in insertion
+order — so a verifier parses and re-serializes rather than hashing the line. The documentation
+carries a twelve-line Python verifier that shares no code with this package; it agrees with
+`dsh-ocsf-verify` on a spool containing quotes, backslashes, control characters, emoji, and a
+non-integer number, which is the check that the specification above is the one the code implements.
+
+**Attesting is on by default.** A tamper-evidence feature nobody enables covers nothing, and a
+chain enabled halfway through a fleet's life is a chain with a hole in it. The cost was measured
+rather than assumed: **29 µs** and **391 bytes** per record, against a mean record of 1369 bytes —
+so 29% more spool and 29% more shipped bytes, which is the reason `integrity.attest: false` exists,
+and a time cost two orders of magnitude below the 2.7 ms rotation check of §25 that was measurable
+in the agent's response time.
+
+**The chain advances only after the sink accepted the record.** A sink that throws leaves the
+forwarder's cursor on the unwritten event and the next observation retries it (§15); advancing the
+index first would give the retry a different chain position and a fingerprint the previous link
+does not match — the plugin would manufacture the break it exists to detect.
+
+**A verifier ships with it.** `dsh-ocsf-verify` is a linked bin over `verifyRecords`, which reads
+nothing but spool files: it verifies a live spool together with its rotated generations oldest-first
+because the chain runs through the rename, and it separates a chain that starts mid-way (a drained
+generation, or a deleted front — the spool alone cannot tell those apart, and it says so) from an
+interior gap, which is a break. An empty input reports `NOT VERIFIED` and exits non-zero: an audit
+tool that exits zero on a file with nothing in it reports the absence of evidence as evidence.
+
+**`OcsfMetadata.uid` became required.** It was optional and always set. `prev_event.uid` is the
+predecessor's `metadata.uid` and the schema requires it, so the alternative was a `?? ''` on a
+security path — a link to nothing, emitted as a valid-looking string.

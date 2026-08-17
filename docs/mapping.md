@@ -16,7 +16,7 @@ nav_order: 4
   "time": 1786881335332,
   "metadata": {
     "product": { "name": "dsh-ocsf-forwarder", "vendor_name": "dsh-security-plugins", "version": "0.1.0" },
-    "version": "1.9.0", "profiles": ["ai_operation", "cloud", "osint"],
+    "version": "1.9.0", "profiles": ["ai_operation", "cloud", "osint", "record_integrity"],
     "log_provider": "deepseek-harness", "log_name": "session",
     "uid": "01JB0SESSION:7", "correlation_uid": "01JB0SESSION:call_9f2",
     "sequence": 7, "logged_time": 1786823920155, "original_time": "1786881335332",
@@ -31,6 +31,12 @@ nav_order: 4
     "os": { "name": "linux", "type_id": 0 }
   },
   "process": { "name": "curl", "cmd_line": "hmac-sha256:d7df26fddfd3af030679709c66165379" },
+  "attestation_list": [{
+    "uid": "7a1f0c5e-6b2d-4c8a-9f31-2d5b8e0a1c74:41",
+    "chain_uid": "7a1f0c5e-6b2d-4c8a-9f31-2d5b8e0a1c74",
+    "prev_event": { "uid": "01JB0SESSION:6", "type_uid": 600302, "fingerprint": { "value": "9d1c…", "algorithm_id": 3, "encoding_id": 1 } },
+    "fingerprint": { "value": "4b77…", "algorithm_id": 3, "encoding_id": 1 }
+  }],
   "observables": [{ "name": "process.cmd_line", "type_id": 8, "value": "hmac-sha256:d7df26…" }],
   "unmapped": {
     "dsh": {
@@ -47,6 +53,10 @@ The model called `bash` with `curl -s https://api.example.test/v1/x?token=sk-liv
 says a process was launched, that its executable was `curl`, how long the command was, and gives a
 digest that joins it to every other occurrence of the same command — and discloses neither the URL
 nor the token.
+
+`attestation_list` is the OCSF `record_integrity` profile: the record's own SHA-256 fingerprint and
+the fingerprint of the record before it in the spool. [Tamper-evidence](integrity.md) gives the
+canonicalisation a reader recomputes it from, and what it is and is not evidence of.
 
 Every OCSF class is `additionalProperties: false`, so the extension attributes live under
 `unmapped`, which is the base event's own slot for exactly this. `cloud` and `osint` are stubs — a
