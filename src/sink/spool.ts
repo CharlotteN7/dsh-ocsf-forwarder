@@ -133,7 +133,12 @@ function stamp(now: number): string {
   return new Date(now).toISOString().replace(/:/g, '-')
 }
 
-/** One filesystem error reduced to the code and message an operator acts on. */
+/**
+ * One filesystem failure named for an operator: the `errno` code when there is
+ * one, which is the part that says what to fix, and the whole error otherwise.
+ * @param error - what a `node:fs` call threw.
+ * @returns the code, or the error rendered as a string.
+ */
 function describe(error: unknown): string {
   const code = (error as NodeJS.ErrnoException).code
   return code === undefined ? String(error) : code
@@ -336,9 +341,6 @@ export class SpoolSink implements Sink {
   /**
    * Rename the full file to a fresh generation and reopen an empty one.
    *
-   * @param fd - the open descriptor to close, taken as an argument so the one
-   *   caller's guarantee that it has one is what the type says.
-   *
    * Rotation stops once either bound is reached — `maxGenerations` un-drained
    * generations, or `maxTotalBytes` on disk. The live file then grows past
    * `maxBytes`, which is loud and recoverable; deleting a generation to make
@@ -356,6 +358,8 @@ export class SpoolSink implements Sink {
    * when it did not. A spool left without a descriptor writes nothing for the
    * rest of the process's life, which for an audit lane is worse than any
    * rotation outcome.
+   * @param fd - the open descriptor to close, taken as an argument so the one
+   *   caller's guarantee that it has one is what the type says.
    */
   private rotate(fd: number): void {
     const reason = this.rotationBlockedBy()
