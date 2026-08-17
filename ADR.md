@@ -501,3 +501,31 @@ The table is narrowed to the attributes this plugin can emit rather than transcr
 class. That makes it stricter than OCSF: emitting an attribute a class does define but this plugin
 has not emitted before fails until the table is updated. That is the intended cost — the entry is
 one line, and the alternative is a set large enough to stop discriminating again.
+
+## 31. The SOC lane's privacy rule is tested as an invariant, not per call site
+
+`observables[]` had no test asserting any emitted value. The only assertion naming it was
+`expect(mapping?.observables ?? []).toEqual([])`, hedged three ways so an undefined mapping, an
+undefined array and an empty array all passed identically. Three mutations survived a full green
+run: the URL observable carrying the raw URL instead of the redacted one, which would put reset and
+API tokens into the SOC lane; the `file.path` observable carrying the whole argument record; and
+`process.cmd_line` typed `13` (Command Line) while holding a digest.
+
+The shipped code was correct in all three places. This was a missing guard rail, not a leak.
+
+Each observable's `type_id` and `value` is now asserted per type, including under each policy that
+widens it. But asserting call sites one at a time is what left this surface uncovered for three
+releases, so the rule `privacy.ts` states — a raw argument value, message text, or command line
+never reaches the SOC lane unless a deployment opted that whole category in — is now tested as
+itself: a distinct sentinel secret goes into every text-bearing payload field a session event can
+carry, a full forwarder run is driven over them, and the serialized records are searched for all of
+them at once. A field nobody thought to write a test for fails this the moment it starts carrying
+its input.
+
+The restricted lane is driven in the same run and asserted to contain every sentinel, because a
+sentinel that never reached a mapper would make the SOC-lane assertion vacuous for that surface.
+
+Two values are deliberate exceptions and appear in the assertion as a named list rather than being
+excluded from the payloads: a schedule id, which is a durable record identifier a SOC pivots on,
+and the leading executable token of a command line, which `commandName` emits verbatim as metadata
+and which §16 already covers.

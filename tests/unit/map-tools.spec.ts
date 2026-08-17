@@ -4,8 +4,10 @@ import { SessionState } from '../../src/correlate.ts'
 import { mapEvent } from '../../src/map/index.ts'
 import { mapUnresolvedCall } from '../../src/map/tool-events.ts'
 import { classifyTool, parseArguments } from '../../src/map/tools.ts'
-import { CLASS, SEVERITY, STATUS, typeUid } from '../../src/ocsf/constants.ts'
+import { CLASS, OBSERVABLE, SEVERITY, STATUS, typeUid } from '../../src/ocsf/constants.ts'
 import { buildRecord } from '../../src/ocsf/record.ts'
+import type { OcsfObservable } from '../../src/ocsf/types.ts'
+import { digest } from '../../src/privacy.ts'
 import { dshOf, testConfig, testEnvironment } from './support.ts'
 
 const SESSION = 'session-1'
@@ -123,7 +125,7 @@ describe('tool/call mapping', () => {
     )
     expect(mapping?.classUid).toBe(CLASS.fileSystemActivity)
     expect(mapping?.file?.path).toBeUndefined()
-    expect(mapping?.observables ?? []).toEqual([])
+    expect(mapping?.observables).toEqual([])
     expect(JSON.stringify(mapping)).not.toContain('hunter2')
   })
 
@@ -136,6 +138,86 @@ describe('tool/call mapping', () => {
   it('reports unmappable payloads rather than inventing a call id', () => {
     expect(mapEvent(SESSION, { type: 'tool/call', seq: 1, time: 1, data: { name: 'bash' } }, new SessionState(), testConfig()))
       .toBeUndefined()
+  })
+})
+
+describe('the observables a tool call emits', () => {
+  /** The one observable of the given name, so a wrong type or value is not hidden by a sibling. */
+  function observable(mapping: { observables?: readonly OcsfObservable[] } | undefined, name: string): OcsfObservable {
+    const found = (mapping?.observables ?? []).filter(item => item.name === name)
+    expect(found).toHaveLength(1)
+    return found[0] as OcsfObservable
+  }
+
+  it('digests a command line and types it as a hash, not as a command line', () => {
+    const config = testConfig()
+    const command = 'psql "postgres://admin:hunter2@db.test/app"'
+    const mapping = mapEvent(SESSION, call('bash', { command }), new SessionState(), config)
+    const emitted = observable(mapping, 'process.cmd_line')
+    expect(emitted.type_id).toBe(OBSERVABLE.hash)
+    expect(emitted.value).toBe(digest(config.hmacKey, command))
+    expect(emitted.value).not.toContain('hunter2')
+  })
+
+  it('carries the command line verbatim, typed as one, only when a deployment asked for that', () => {
+    const config = testConfig({ privacy: { commandLine: 'full' } })
+    const command = 'psql "postgres://admin:hunter2@db.test/app"'
+    const emitted = observable(mapEvent(SESSION, call('bash', { command }), new SessionState(), config), 'process.cmd_line')
+    expect(emitted.type_id).toBe(OBSERVABLE.commandLine)
+    expect(emitted.value).toBe(command)
+  })
+
+  it('carries the file path itself, not the argument record it came from', () => {
+    const mapping = mapEvent(
+      SESSION,
+      call('write', { file_path: '/srv/app/.env', content: 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK' }),
+      new SessionState(),
+      testConfig(),
+    )
+    const emitted = observable(mapping, 'file.path')
+    expect(emitted.type_id).toBe(OBSERVABLE.filePath)
+    expect(emitted.value).toBe('/srv/app/.env')
+    expect(emitted.value).not.toContain('wJalrXUtnFEMIK')
+  })
+
+  it('carries the redacted URL, not the one the model wrote', () => {
+    const mapping = mapEvent(
+      SESSION,
+      call('web_fetch', { url: 'https://example.test/reset?token=sk-live-1#frag' }),
+      new SessionState(),
+      testConfig(),
+    )
+    const emitted = observable(mapping, 'http_request.url.url_string')
+    expect(emitted.type_id).toBe(OBSERVABLE.url)
+    expect(emitted.value).toBe('https://example.test')
+    expect(emitted.value).not.toContain('sk-live-1')
+  })
+
+  it('follows the URL policy a deployment set, and never widens past it', () => {
+    const sanitized = mapEvent(
+      SESSION,
+      call('web_fetch', { url: 'https://example.test/reset?token=sk-live-1' }),
+      new SessionState(),
+      testConfig({ privacy: { url: 'sanitized' } }),
+    )
+    expect(observable(sanitized, 'http_request.url.url_string').value).toBe('https://example.test/reset')
+
+    const full = mapEvent(
+      SESSION,
+      call('web_fetch', { url: 'https://example.test/reset?token=sk-live-1' }),
+      new SessionState(),
+      testConfig({ privacy: { url: 'full' } }),
+    )
+    expect(observable(full, 'http_request.url.url_string').value).toBe('https://example.test/reset?token=sk-live-1')
+  })
+
+  it('emits no observable for a call that named no subject to observe', () => {
+    expect(mapEvent(SESSION, call('bash', { description: 'nothing to run' }), new SessionState(), testConfig())?.observables)
+      .toEqual([])
+    expect(mapEvent(SESSION, call('read', { pattern: 'x' }), new SessionState(), testConfig())?.observables).toEqual([])
+    expect(mapEvent(SESSION, call('web_fetch', { url: 'not-a-url' }), new SessionState(), testConfig())?.observables)
+      .toEqual([])
+    expect(mapEvent(SESSION, call('mystery_tool', { a: 1 }), new SessionState(), testConfig())?.observables).toEqual([])
   })
 })
 

@@ -140,3 +140,22 @@ configurable: misclassifying `bash` as an API call on a deployment's say-so woul
 process-based detection downstream. Deployments extend coverage for their own tools through
 `toolClasses` (additive only — a config entry may add an unknown tool name, never reclassify a
 known one).
+
+### Observables
+
+A tool call contributes at most one observable, carrying the same value the record's own object
+carries and typed for what that value actually is:
+
+| `name` | `type_id` | Value |
+|---|---|---|
+| `process.cmd_line` | `8` Hash, or `13` Command Line under `commandLine: full` | The command under the `commandLine` policy — a keyed digest by default. The type follows the policy, so a digest is never presented to a SIEM as a command line. |
+| `file.path` | `45` File Path | The `file_path`/`path` argument itself, emitted verbatim: a path is the security signal, not a secret. Never the argument record it was read from. |
+| `http_request.url.url_string` | `6` URL | The URL under the `url` policy — scheme and host by default, so the query string that carries reset and API tokens is gone before the record exists. |
+
+A call whose arguments name no subject — a `grep` with only a pattern, a `web_fetch` whose URL does
+not parse, any API-class tool — contributes none.
+
+`observables[]` is the one place a redacted value and its raw source sit one line apart in the
+mapper, so it is covered by an invariant rather than by a test per call site: a sentinel secret is
+placed in every text-bearing session-event payload field, a full forwarder run is driven over them,
+and the serialized SOC-lane records are searched for all of them at once.
