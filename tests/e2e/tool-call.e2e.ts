@@ -45,7 +45,7 @@ describe('a real agent run, normalised to OCSF', () => {
     expect(call.activity_id).toBe(1)
     expect(call.type_uid).toBe(100701)
     expect(call.metadata.version).toBe('1.9.0')
-    expect(call.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
+    expect(call.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint', 'record_integrity'])
 
     // Correlated by callId, through a correlation id both records carry.
     expect(call.metadata.correlation_uid).toBe(settled.metadata.correlation_uid)
@@ -107,7 +107,7 @@ describe('a real agent run, normalised to OCSF', () => {
       expect(record.type_uid).toBe(record.class_uid * 100 + record.activity_id)
       expect(record.cloud).toEqual({ provider: 'Other' })
       expect(record.osint).toEqual([])
-      expect(record.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
+      expect(record.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint', 'record_integrity'])
       // No extension uid is claimed, and nothing sits outside the class's own
       // attributes: every OCSF class is `additionalProperties: false`.
       expect(record.metadata.extension).toBeUndefined()

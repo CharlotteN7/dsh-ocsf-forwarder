@@ -104,6 +104,12 @@ export interface AgentRunResult {
   readonly stderr: string
   /** OCSF records the forwarder spooled, in order. */
   readonly ocsfRecords: readonly OcsfLine[]
+  /**
+   * The spool's lines exactly as they were written, byte for byte. The
+   * integrity chain covers the serialized record, so a test that re-serializes
+   * the parsed form is not verifying what the forwarder wrote.
+   */
+  readonly ocsfSpoolLines: readonly string[]
   /** The persisted session log, one parsed JSONL row per element. */
   readonly sessionLog: readonly Record<string, unknown>[]
   /** Wire requests the agent made, as captured by the mock. */
@@ -153,8 +159,8 @@ function filesUnder(dir: string): string[] {
   })
 }
 
-/** Parse a JSONL file into rows; a missing file yields an empty list. */
-function readJsonl(file: string): Record<string, unknown>[] {
+/** Read a JSONL file's lines; a missing file yields none. */
+function readLines(file: string): string[] {
   let text: string
   try {
     text = readFileSync(file, 'utf8')
@@ -162,7 +168,12 @@ function readJsonl(file: string): Record<string, unknown>[] {
     // ENOENT only: the plugin writes lazily and a run may observe nothing.
     return []
   }
-  return text.split('\n').filter(line => line.length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
+  return text.split('\n').filter(line => line.length > 0)
+}
+
+/** Parse a JSONL file into rows; a missing file yields an empty list. */
+function readJsonl(file: string): Record<string, unknown>[] {
+  return readLines(file).map(line => JSON.parse(line) as Record<string, unknown>)
 }
 
 /**
@@ -338,6 +349,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       stdout,
       stderr,
       ocsfRecords: readJsonl(spoolPath) as OcsfLine[],
+      ocsfSpoolLines: readLines(spoolPath),
       sessionLog: logFile === undefined ? [] : readJsonl(logFile),
       modelRequests: [...server.requests],
     }

@@ -140,3 +140,19 @@ jobs:
             tar tzf "$tarball" | grep '^package/lib/' || true
             exit 1
           fi
+
+      # The verifier is the half of the tamper-evidence feature a reader runs, so
+      # it is checked from the published layout rather than from the checkout.
+      - name: The published verifier runs
+        run: |
+          set -euo pipefail
+          tarball="$(ls /tmp/dsh-ocsf-forwarder-*.tgz)"
+          rm -rf /tmp/published && mkdir -p /tmp/published
+          tar xzf "$tarball" -C /tmp/published
+          node /tmp/published/package/bin/dsh-ocsf-verify.mjs --help | grep -q 'usage: dsh-ocsf-verify'
+          status=0
+          node /tmp/published/package/bin/dsh-ocsf-verify.mjs > /dev/null || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "::error::the verifier exited $status with no spool named, expected 2"
+            exit 1
+          fi
