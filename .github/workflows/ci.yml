@@ -13,12 +13,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Pinned to the rc this plugin is developed against. The npm `latest` dist-tag
-  # for @deepseek-ai/dsh-* still points at 0.0.1-rc.1, so a floating range would
-  # silently resolve to ancient code.
-  DSH_VERSION: 0.1.0-rc.6
-
 jobs:
   build:
     name: build and unit tests (node ${{ matrix.node }})
@@ -55,8 +49,16 @@ jobs:
         run: pnpm run test:coverage
 
   e2e:
-    name: end-to-end against a real harness
+    name: end-to-end against a real harness (dsh ${{ matrix.dsh }})
     runs-on: ubuntu-latest
+    # Every rc the peer ranges accept, pinned rather than floating: `^0.1.0-rc.6`
+    # is a promise about all of them, and the npm `latest` dist-tag for
+    # @deepseek-ai/dsh-* still points at 0.0.1-rc.1, so a range here would
+    # resolve to ancient code rather than to the newest rc.
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ['0.1.0-rc.6', '0.1.0-rc.7']
     steps:
       - uses: actions/checkout@v4
       - run: corepack enable
@@ -97,7 +99,7 @@ jobs:
             protobufjs: true
             '@google/genai': true
           YAML
-          pnpm add -D "@deepseek-ai/dsh@${DSH_VERSION}"
+          pnpm add -D "@deepseek-ai/dsh@${{ matrix.dsh }}"
           test -f node_modules/@deepseek-ai/dsh/lib/bin.js
 
       # Keyless. The mock speaks the OpenAI wire protocol, so the provider

@@ -18,7 +18,24 @@ dsh --profile <name> --dump-config      # verify the row is mounted
 ```
 
 Pin `@deepseek-ai/dsh-headless` explicitly: its npm `latest` tag still points at
-`0.0.1-rc.1`, so an unpinned install silently resolves to a much older harness.
+`0.0.1-rc.1`, so an unpinned install silently resolves to a much older harness. `0.1.0-rc.7` works
+equally well — this plugin's peers are `^0.1.0-rc.6` and CI runs the end-to-end suite against both
+rcs.
+
+**Peer ranges.** `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-session-telemetry` are
+`^0.1.0-rc.6`, so a project already resolving a newer rc — which is what installing the
+`0.1.0-rc.7` CLI gives you — can add this plugin without npm refusing the tree. An exact pin made
+that combination fail:
+
+```
+npm error ERESOLVE unable to resolve dependency tree
+npm error Found: @deepseek-ai/dsh-session@0.1.0-rc.7
+npm error Could not resolve dependency:
+npm error peer @deepseek-ai/dsh-session@"0.1.0-rc.6" from dsh-ocsf-forwarder@0.3.0
+```
+
+`@deepseek-ai/cordis` stays pinned to exactly `4.0.1`: it is the service graph every registration
+goes through, two copies of it are two graphs, and upstream has not moved off that version.
 
 **Install from the registry or a packed tarball, not from a git spec.**
 `dsh plugin add github:CharlotteN7/dsh-ocsf-forwarder` resolves and writes the

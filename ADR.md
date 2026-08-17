@@ -546,3 +546,36 @@ modes are asserted twice each. The mode is now forced with `chmodSync` after the
 same reason the spool forces its own: `appendFileSync`'s `mode` applies only on creation and is
 masked by the process umask, so the pre-existing code produced 0600 under a umask of 077 and an
 exact assertion could not be written against it.
+
+## 33. The DSH peer ranges are `^0.1.0-rc.6`; cordis stays exact
+
+The peers were pinned to exactly `0.1.0-rc.6`. Upstream published `0.1.0-rc.7` on
+2026-08-17T11:50Z, four hours after this package's own publish, and an exact pin turns a newer rc
+into an install failure:
+
+```
+npm error ERESOLVE unable to resolve dependency tree
+npm error Found: @deepseek-ai/dsh-session@0.1.0-rc.7
+npm error Could not resolve dependency:
+npm error peer @deepseek-ai/dsh-session@"0.1.0-rc.6" from dsh-ocsf-forwarder@0.3.0
+```
+
+A bare `npm install dsh-ocsf-forwarder` into an empty project still succeeds — npm installs the
+pinned peer itself, and rc.6 is still on the registry. What fails is the case that matters: a
+project that already resolves rc.7, which is what installing the rc.7 CLI gives it. pnpm resolves
+either way, so `dsh plugin add` never surfaced this.
+
+`@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-session-telemetry` are now `^0.1.0-rc.6`, which
+under semver admits every prerelease of `0.1.0` from rc.6 up. Three things were checked rather than
+assumed:
+
+- Every file in both packages is byte-identical between rc.6 and rc.7 except `package.json`, whose
+  only differences are its own version and its own `^0.1.0-rc.6` → `^0.1.0-rc.7` ranges. The type
+  surface this plugin compiles against did not move.
+- Both rcs declare `@deepseek-ai/cordis: ^4.0.1`.
+- The end-to-end suite — six tests, a real `dsh` subprocess, this plugin mounted — passes against
+  the published rc.6 and rc.7 CLIs. CI now runs it as a matrix over both rather than the oldest
+  alone, because a range is a promise about everything in it.
+
+`@deepseek-ai/cordis` keeps its exact `4.0.1`. It is the service graph every registration goes
+through; two resolved copies are two graphs, and there is no upstream version to widen towards.
