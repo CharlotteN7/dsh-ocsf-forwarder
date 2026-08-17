@@ -144,6 +144,13 @@ so naming both fails at load.
 | `extension.uid` | — | OCSF extension uid, as assigned by the OCSF extension registry. `metadata.extensions` is omitted until one is configured: there is no free private range, and every unassigned value collides with somebody's. |
 | `vendorName` | `dsh-security-plugins` | `metadata.product.vendor_name`. |
 
+Every numeric key above must be a positive finite number, and the ones that count records or files
+— `spoolMaxGenerations`, `<shipper>.batchSize`, `extension.uid` — must be whole numbers.
+`statsIntervalMs` is the one exception: its `0` means what the table says. A value outside those
+ranges fails at load, because the alternative is worse than a refused mount — `batchSize: 0` makes
+the shipper loop without ever advancing its cursor, and a `timeoutMs` of `0` is a request that can
+never complete.
+
 ## A record
 
 ```json

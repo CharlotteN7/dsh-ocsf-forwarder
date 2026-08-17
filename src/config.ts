@@ -399,6 +399,35 @@ export interface ResolvedShipper {
 const MIN_HMAC_KEY_BYTES = 32
 
 /**
+ * Validate one positive finite limit.
+ *
+ * The schema types these fields as numbers and nothing more, so `0` reaches the
+ * runtime: as a batch size it is an infinite loop in the shipper, as a timeout
+ * it is a request that can never complete, and as a rotation bound it is a
+ * spool that refuses to rotate for the life of the process. Misconfiguration
+ * fails at load instead.
+ * @param name - the configuration key, named in the failure message.
+ * @param value - the configured value.
+ * @returns the value, once it is usable.
+ */
+function assertPositive(name: string, value: number): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`ocsf-forwarder: ${name} must be a positive finite number`)
+  return value
+}
+
+/** Validate one count of records or files, which a fraction cannot express. */
+function assertPositiveInteger(name: string, value: number): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`ocsf-forwarder: ${name} must be a positive integer`)
+  return value
+}
+
+/** Validate one interval whose zero has a documented meaning of its own. */
+function assertNonNegative(name: string, value: number): number {
+  if (!Number.isFinite(value) || value < 0) throw new Error(`ocsf-forwarder: ${name} must be zero or a positive finite number`)
+  return value
+}
+
+/**
  * Resolve the digest key. Deployment-supplied keys are validated here so a
  * weak or absent key fails at load rather than producing guessable digests.
  * @param config - the validated configuration.
@@ -462,15 +491,22 @@ function destinationUrl(key: string, endpoint: string, defaultPath: string): str
   return url.pathname === '/' ? new URL(defaultPath, url).href : url.href
 }
 
-/** The delivery settings shared by every destination, with the spool-derived defaults applied. */
-function shipperDefaults(config: Config, block: ShipperConfig): Omit<ResolvedShipper, 'transport'> {
+/**
+ * The delivery settings shared by every destination, with the spool-derived
+ * defaults applied.
+ * @param config - the validated configuration, read for the spool-derived paths.
+ * @param key - the configuration block these settings came from, named in any failure.
+ * @param block - the block itself.
+ * @returns the resolved delivery settings.
+ */
+function shipperDefaults(config: Config, key: string, block: ShipperConfig): Omit<ResolvedShipper, 'transport'> {
   return {
-    batchSize: block.batchSize ?? DEFAULT_BATCH_SIZE,
-    flushIntervalMs: block.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
-    timeoutMs: block.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    batchSize: assertPositiveInteger(`${key}.batchSize`, block.batchSize ?? DEFAULT_BATCH_SIZE),
+    flushIntervalMs: assertPositive(`${key}.flushIntervalMs`, block.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS),
+    timeoutMs: assertPositive(`${key}.timeoutMs`, block.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     cursorPath: block.cursorPath ?? `${config.spoolPath}.cursor`,
-    maxReadBytes: block.maxReadBytes ?? DEFAULT_MAX_READ_BYTES,
-    maxBackoffMs: block.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
+    maxReadBytes: assertPositive(`${key}.maxReadBytes`, block.maxReadBytes ?? DEFAULT_MAX_READ_BYTES),
+    maxBackoffMs: assertPositive(`${key}.maxBackoffMs`, block.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
     quarantinePath: block.quarantinePath ?? `${config.spoolPath}.quarantine`,
   }
 }
@@ -534,7 +570,7 @@ function resolveShipper(
         { ...config.otlp?.headers },
         PRODUCT_NAME,
       ),
-      ...shipperDefaults(config, config.otlp ?? {}),
+      ...shipperDefaults(config, 'otlp', config.otlp ?? {}),
     }
   }
   if (splunkEndpoint === undefined) return undefined
@@ -550,7 +586,7 @@ function resolveShipper(
         ...config.splunk?.index === undefined ? {} : { index: config.splunk.index },
       },
     ),
-    ...shipperDefaults(config, config.splunk ?? {}),
+    ...shipperDefaults(config, 'splunk', config.splunk ?? {}),
   }
 }
 
@@ -608,8 +644,14 @@ export function resolveConfig(
 ): ResolvedConfig {
   const dropped = new Set([...DEFAULT_DROPPED_EVENT_TYPES, ...config.dropEventTypes ?? []])
   for (const type of config.includeEventTypes ?? []) dropped.delete(type)
-  const maxTotalBytes = config.spoolMaxTotalBytes ?? DEFAULT_SPOOL_MAX_TOTAL_BYTES
-  const highWaterBytes = config.spoolHighWaterBytes ?? DEFAULT_SPOOL_HIGH_WATER_BYTES
+  const maxTotalBytes = assertPositive(
+    'spoolMaxTotalBytes',
+    config.spoolMaxTotalBytes ?? DEFAULT_SPOOL_MAX_TOTAL_BYTES,
+  )
+  const highWaterBytes = assertPositive(
+    'spoolHighWaterBytes',
+    config.spoolHighWaterBytes ?? DEFAULT_SPOOL_HIGH_WATER_BYTES,
+  )
   if (highWaterBytes > maxTotalBytes) {
     throw new Error(
       `ocsf-forwarder: spoolHighWaterBytes (${String(highWaterBytes)}) exceeds spoolMaxTotalBytes `
@@ -618,11 +660,14 @@ export function resolveConfig(
   }
   return {
     spoolPath: config.spoolPath,
-    spoolMaxBytes: config.spoolMaxBytes ?? DEFAULT_SPOOL_MAX_BYTES,
-    spoolMaxGenerations: config.spoolMaxGenerations ?? DEFAULT_SPOOL_MAX_GENERATIONS,
+    spoolMaxBytes: assertPositive('spoolMaxBytes', config.spoolMaxBytes ?? DEFAULT_SPOOL_MAX_BYTES),
+    spoolMaxGenerations: assertPositiveInteger(
+      'spoolMaxGenerations',
+      config.spoolMaxGenerations ?? DEFAULT_SPOOL_MAX_GENERATIONS,
+    ),
     spoolMaxTotalBytes: maxTotalBytes,
     spoolHighWaterBytes: highWaterBytes,
-    statsIntervalMs: config.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS,
+    statsIntervalMs: assertNonNegative('statsIntervalMs', config.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS),
     restrictedPath: resolveRestrictedPath(config),
     shipper: resolveShipper(config, env, hostname),
     fleet: resolveFleet(config),
@@ -635,7 +680,9 @@ export function resolveConfig(
     toolClasses: { ...config.toolClasses },
     delegationTools: { ...config.delegationTools },
     extensionName: config.extension?.name ?? 'dsh',
-    extensionUid: config.extension?.uid,
+    extensionUid: config.extension?.uid === undefined
+      ? undefined
+      : assertPositiveInteger('extension.uid', config.extension.uid),
     extensionPlacement: config.extension?.placement ?? 'unmapped',
     vendorName: config.vendorName ?? DEFAULT_VENDOR_NAME,
   }

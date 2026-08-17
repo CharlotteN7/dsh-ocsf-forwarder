@@ -384,3 +384,19 @@ rotation must resume once the shipper drains a generation, and nothing else re-a
 resetting the byte counter would delay resumption by another whole `spoolMaxBytes`, which is
 hundreds of megabytes. The window costs at most a minute of extra growth against that same
 threshold. The rotation policy itself is unchanged: this is a hot-path fix, not a retention change.
+
+## 26. Numeric configuration is range-checked at load
+
+`z.number()` accepts every double, so `batchSize: 0` reached `index += this.options.batchSize` in
+the shipper's batching loop and hung the agent process — a typo in `cordis.yml` turning into a
+non-responsive `dsh` with no message anywhere. `timeoutMs: 0`, `spoolMaxBytes: 0` and a negative
+`statsIntervalMs` are the same defect: a value the type accepts, a runtime that cannot use it, and a
+failure that appears far from its cause.
+
+The schema library cannot express the bound, so resolution does: one helper per range, applied to
+every numeric as it is defaulted. Counts of records and files additionally require a whole number,
+because half a batch is not a quantity the loop can make progress on. `statsIntervalMs` takes zero,
+which the README documents as reporting at unload only, and is checked as non-negative instead.
+
+This is upstream's rule, not a local preference: misconfiguration fails loud at load when it is
+self-contained, and every one of these is.

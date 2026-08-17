@@ -235,6 +235,58 @@ describe('fleet identity', () => {
   })
 })
 
+describe('numeric bounds', () => {
+  it('refuses a batch size of zero, which ships nothing and never advances the cursor', () => {
+    expect(() => resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318', batchSize: 0 } }))
+      .toThrow(/otlp\.batchSize must be a positive integer/)
+  })
+
+  it('refuses a fractional batch size, because a batch is a count of records', () => {
+    expect(() => resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318', batchSize: 2.5 } }))
+      .toThrow(/otlp\.batchSize must be a positive integer/)
+  })
+
+  it('names the destination block a bad delivery limit came from', () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      splunk: { endpoint: 'https://splunk.internal:8088', token: { source: 'literal', value: 't' }, timeoutMs: 0 },
+    })).toThrow(/splunk\.timeoutMs must be a positive finite number/)
+  })
+
+  it.each([
+    ['spoolMaxBytes', { spoolMaxBytes: 0 }],
+    ['spoolMaxTotalBytes', { spoolMaxTotalBytes: 0 }],
+    ['spoolHighWaterBytes', { spoolHighWaterBytes: -1 }],
+    ['otlp.flushIntervalMs', { otlp: { endpoint: 'http://collector:4318', flushIntervalMs: 0 } }],
+    ['otlp.maxReadBytes', { otlp: { endpoint: 'http://collector:4318', maxReadBytes: 0 } }],
+    ['otlp.maxBackoffMs', { otlp: { endpoint: 'http://collector:4318', maxBackoffMs: Number.POSITIVE_INFINITY } }],
+  ])('refuses %s outside the range it is usable in', (key, overrides) => {
+    expect(() => resolveConfig({ ...minimal, ...overrides }))
+      .toThrow(new RegExp(`${key.replace('.', '\\.')} must be a positive finite number`))
+  })
+
+  it('refuses a rotation generation count that is not a whole number of files', () => {
+    expect(() => resolveConfig({ ...minimal, spoolMaxGenerations: 0 }))
+      .toThrow(/spoolMaxGenerations must be a positive integer/)
+  })
+
+  it('refuses a stats interval below zero, which setInterval turns into a heartbeat storm', () => {
+    expect(() => resolveConfig({ ...minimal, statsIntervalMs: -1 }))
+      .toThrow(/statsIntervalMs must be zero or a positive finite number/)
+    expect(() => resolveConfig({ ...minimal, statsIntervalMs: Number.NaN }))
+      .toThrow(/statsIntervalMs must be zero or a positive finite number/)
+  })
+
+  it('accepts a stats interval of zero, which reports at unload only', () => {
+    expect(resolveConfig({ ...minimal, statsIntervalMs: 0 }).statsIntervalMs).toBe(0)
+  })
+
+  it('refuses an extension uid the registry could not have assigned', () => {
+    expect(() => resolveConfig({ ...minimal, extension: { uid: 0 } }))
+      .toThrow(/extension\.uid must be a positive integer/)
+  })
+})
+
 describe('delegation tools', () => {
   it('carries the configured delegation names into the resolved configuration', () => {
     const resolved = resolveConfig({ ...minimal, delegationTools: { handoff: 'codex' } })

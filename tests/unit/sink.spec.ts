@@ -397,10 +397,12 @@ describe('the shipper', () => {
 
   it('resumes at full rate once the collector recovers', async () => {
     let outcome: BatchOutcome = 'retry'
-    const { instance, path } = shipper(async () => outcome, { flushIntervalMs: 0 })
+    // The shortest backoff the settings allow, so the window can be waited out.
+    const { instance, path } = shipper(async () => outcome, { flushIntervalMs: 1, maxBackoffMs: 1 })
     writeFileSync(path, `${JSON.stringify(record('a'))}\n`)
     expect(await instance.drain()).toBe(0)
     outcome = 'accepted'
+    await new Promise(resolve => setTimeout(resolve, 5))
     expect(await instance.drain()).toBe(1)
     writeFileSync(path, `${JSON.stringify(record('a'))}\n${JSON.stringify(record('b'))}\n`)
     expect(await instance.drain()).toBe(1)
@@ -459,7 +461,7 @@ describe('the shipper', () => {
     let calls = 0
     const { instance, path } = shipper(
       async () => { calls += 1; return calls === 1 ? 'accepted' : 'retry' },
-      { batchSize: 1, flushIntervalMs: 0 },
+      { batchSize: 1 },
     )
     writeFileSync(path, [record('a'), record('b'), record('c')].map(item => `${JSON.stringify(item)}\n`).join(''))
     expect(await instance.drain()).toBe(1)
