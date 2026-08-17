@@ -266,6 +266,21 @@ describe('disposal', () => {
     expect(unresolved[1]?.metadata.uid).toBe('s1:unresolved:approval:a9')
   })
 
+  it('reports nothing unresolved for a call and an approval that did settle', () => {
+    const { instance, sink } = forwarder()
+    const session = new FakeSession('s1', 0)
+    instance.observe(session, session.append('tool/call', { turn: 1, step: 0, callId: 'c9', name: 'bash', arguments: '{"command":"true"}' }))
+    instance.observe(session, session.append('tool/result', { message: { source: { callId: 'c9' } } }))
+    instance.observe(session, session.append('approval/asked', { id: 'a9', toolName: 'bash' }))
+    instance.observe(session, session.append('approval/decided', { id: 'a9', outcome: 'allowed-once' }))
+    instance.dispose(session)
+
+    // A settled pair that is still in the correlation map is re-emitted here as
+    // an abandoned action, which reaches the SIEM as a false alert on every
+    // tool call the agent ever completed.
+    expect(sink.records.filter(record => dshOf(record)['unresolved'] === true)).toEqual([])
+  })
+
   it('measures an abandoned call against the log clock, not the wall clock', () => {
     const { instance, sink } = forwarder()
     const session = new FakeSession('s1', 0)

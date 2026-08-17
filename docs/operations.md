@@ -148,7 +148,9 @@ exists is taken over.
 **Retry and quarantine.** A batch the destination cannot take right now is retried with
 exponential backoff from `flushIntervalMs` up to `maxBackoffMs`, and the cursor does not move. A
 batch it refuses on content is appended to `quarantinePath` and stepped over, because retrying it
-forever would hold every later record behind one the destination will never accept. Each
+forever would hold every later record behind one the destination will never accept. That file holds
+whole OCSF records, so its mode is forced to 0640 — the SOC lane's own — rather than left to the
+process umask. Each
 quarantined batch is reported through the plugin logger, naming the destination that refused it.
 Which statuses fall where is the transport's decision: OTLP retries 5xx, timeouts, connection
 failures and 408/425/429 and refuses any other 4xx; Splunk's reading is in

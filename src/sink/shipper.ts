@@ -19,11 +19,19 @@
  * @module sink/shipper
  */
 
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync, chmodSync, closeSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs'
 import type { ResolvedShipper } from '../config.ts'
 import type { OcsfRecord } from '../ocsf/types.ts'
 import { rotatedGenerations } from './spool.ts'
 import { postBatch, type PostBatch } from './transport.ts'
+
+/**
+ * Mode of the quarantine file. It holds whole refused records, so it is the SOC
+ * lane's mode: readable by the operator's group, never by the world.
+ */
+const QUARANTINE_MODE = 0o640
 
 /** How far one file was drained, and whether anything is left in it. */
 interface FileProgress {
@@ -265,9 +273,17 @@ export class Shipper {
     }
   }
 
-  /** Move a batch the destination refused into the quarantine file. */
+  /**
+   * Move a batch the destination refused into the quarantine file.
+   *
+   * The file holds complete OCSF records, so it carries the SOC lane's mode.
+   * `appendFileSync`'s `mode` applies only when it creates the file and is
+   * masked by the process umask, so the mode is forced afterwards the way the
+   * spool forces its own.
+   */
   private quarantine(lines: readonly string[]): void {
-    appendFileSync(this.options.quarantinePath, `${lines.join('\n')}\n`, { mode: 0o640 })
+    appendFileSync(this.options.quarantinePath, `${lines.join('\n')}\n`, { mode: QUARANTINE_MODE })
+    chmodSync(this.options.quarantinePath, QUARANTINE_MODE)
     this.quarantined += lines.length
     this.onError(new Error(
       `ocsf-forwarder: ${this.options.transport.kind} destination refused ${String(lines.length)} record(s); `

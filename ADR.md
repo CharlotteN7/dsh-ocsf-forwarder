@@ -529,3 +529,20 @@ Two values are deliberate exceptions and appear in the assertion as a named list
 excluded from the payloads: a schedule id, which is a durable record identifier a SOC pivots on,
 and the leading executable token of a command line, which `commandName` emits verbatim as metadata
 and which §16 already covers.
+
+## 32. A settled pair leaves the correlation map, and the quarantine file carries the spool's mode
+
+Two more mutations survived a full green run.
+
+Dropping `this.calls.delete(callId)` from `SessionState.closeCall` changed nothing any test could
+see. In production every settled call would still be in the map at `dispose()`, and the unresolved
+flush would re-emit all of them as `unresolved: true` — a stream of false "abandoned action" alerts
+into the SIEM, one per tool call the agent ever completed. Disposal is now asserted to emit nothing
+unresolved for a call and an approval that did settle, which is the behaviour the delete exists for.
+
+The quarantine file's mode was `0o640` passed to `appendFileSync`, asserted nowhere; `0o666`
+survived. It holds complete refused OCSF records, which is the same content as the spool, whose two
+modes are asserted twice each. The mode is now forced with `chmodSync` after the append, for the
+same reason the spool forces its own: `appendFileSync`'s `mode` applies only on creation and is
+masked by the process umask, so the pre-existing code produced 0600 under a umask of 077 and an
+exact assertion could not be written against it.

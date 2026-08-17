@@ -497,6 +497,15 @@ describe('the shipper', () => {
     expect(attempts).toBe(3)
   })
 
+  it('creates the quarantine file no more readable than the spool it came out of', async () => {
+    const { instance, path, quarantine } = shipper(async () => 'reject')
+    writeFileSync(path, `${JSON.stringify(record('a'))}\n`)
+    await instance.drain()
+    // Complete OCSF records, in a file whose whole purpose is that nobody
+    // drained it: the SOC lane's own mode, not whatever the umask allowed.
+    expect(statSync(quarantine).mode & 0o777).toBe(0o640)
+  })
+
   it('backs off after a transient failure instead of hammering the collector', async () => {
     let attempts = 0
     const { instance, path } = shipper(async () => { attempts += 1; return 'retry' }, { flushIntervalMs: 60_000 })
