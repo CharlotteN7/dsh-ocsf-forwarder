@@ -15,5 +15,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "tests", "*.config.ts"]
+  "include": ["src", "tests", "scripts", "*.config.ts"]
 }
