@@ -251,7 +251,10 @@ export function buildRecord(
     delegation: mapping.delegation,
     actor: env.actor,
     device: env.device,
-    user: env.user,
+    // Authorize Session requires `user` and is the only class this plugin emits
+    // that defines it; the account behind every other record is `actor.user`,
+    // which every class does define.
+    user: mapping.classUid === CLASS.authorizeSession ? env.user : undefined,
     process: mapping.process,
     file: mapping.file,
     api: mapping.api,

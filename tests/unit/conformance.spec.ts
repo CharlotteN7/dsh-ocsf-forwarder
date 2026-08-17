@@ -27,16 +27,44 @@ const REQUIRED: Readonly<Record<number, readonly string[]>> = Object.freeze({
   [CLASS.apiActivity]: ['time', 'class_uid', 'category_uid', 'type_uid', 'activity_id', 'severity_id', 'metadata', 'actor', 'api', 'src_endpoint'],
 })
 
-/** Attributes the base event defines; anything else at the top level is a schema violation. */
-const BASE_EVENT_ATTRIBUTES: ReadonlySet<string> = new Set([
+/** Attributes the base event defines, which every class therefore accepts. */
+const BASE_EVENT_ATTRIBUTES: readonly string[] = [
   'activity_id', 'activity_name', 'category_uid', 'class_uid', 'cloud', 'count', 'duration',
   'end_time', 'enrichments', 'message', 'metadata', 'observables', 'osint', 'raw_data',
   'severity_id', 'start_time', 'status_detail', 'status_id', 'time', 'timezone_offset',
   'type_uid', 'unmapped',
-  // Class-owned and profile-owned attributes the mappers fill.
-  'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'http_request',
-  'application', 'job', 'message_context', 'privileges', 'process', 'src_endpoint', 'user',
-])
+]
+
+/**
+ * Per class, the attributes that class defines beyond the base event, narrowed
+ * to the ones this plugin can emit.
+ *
+ * Read from `schema.ocsf.io/api/1.9.0/classes/<name>` with every profile
+ * applied. Checking against the union of all seven would pass anything any one
+ * class happens to define — `src_endpoint` stamped onto all seven survived a
+ * green run — so each class is checked against its own definition, which is
+ * what `additionalProperties: false` actually means. Emitting an attribute a
+ * class does define but the plugin has not emitted before is a deliberate
+ * change, and updating this table is how it gets made.
+ */
+const CLASS_ATTRIBUTES: Readonly<Record<number, readonly string[]>> = Object.freeze({
+  [CLASS.fileSystemActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'message_context'],
+  [CLASS.scheduledJobActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'job', 'message_context'],
+  [CLASS.processActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'message_context', 'process'],
+  [CLASS.authorizeSession]: [
+    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'http_request', 'message_context',
+    'privileges', 'src_endpoint', 'user',
+  ],
+  [CLASS.httpActivity]: [
+    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'http_request',
+    'message_context', 'src_endpoint',
+  ],
+  [CLASS.applicationLifecycle]: ['actor', 'ai_agent', 'ai_model', 'api', 'application', 'delegation', 'device', 'message_context'],
+  [CLASS.apiActivity]: [
+    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'http_request', 'message_context',
+    'src_endpoint',
+  ],
+})
 
 /** One run covering every mapper, driven the way the session store drives one. */
 function emitted(): readonly OcsfRecord[] {
@@ -118,9 +146,14 @@ describe('OCSF 1.9.0 conformance', () => {
     expect(violations).toEqual([])
   })
 
-  it('adds no top-level attribute the base event does not define', () => {
-    const extra = new Set(records.flatMap(record => Object.keys(record).filter(key => !BASE_EVENT_ATTRIBUTES.has(key))))
-    expect([...extra]).toEqual([])
+  it('adds no top-level attribute its own class does not define', () => {
+    const violations = new Set(records.flatMap((record) => {
+      const allowed = new Set([...BASE_EVENT_ATTRIBUTES, ...CLASS_ATTRIBUTES[record.class_uid] ?? []])
+      return Object.keys(record)
+        .filter(key => !allowed.has(key))
+        .map(key => `${String(record.class_uid)}: ${key}`)
+    }))
+    expect([...violations].sort()).toEqual([])
   })
 
   it('declares a profile for every profile-owned attribute it carries', () => {

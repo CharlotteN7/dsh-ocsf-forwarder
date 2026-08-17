@@ -478,3 +478,26 @@ The probe also reported a `<corrupt>` line, which is not one: it scans every fil
 directory, and `<spoolPath>.lock` holds the owning pid rather than JSON. No partial record line
 exists — a rotation that fails leaves the live file exactly as the last complete `write()` left it,
 because the rename is attempted only between whole lines.
+
+## 30. Conformance is checked per class, because that is what `additionalProperties: false` means
+
+The test named "adds no top-level attribute the base event does not define" checked every record
+against one set that was the base event **plus every class-owned attribute any of the seven classes
+uses**. Nothing it could catch was a violation of what its name promised: `src_endpoint` stamped
+onto all seven classes survived a green run, which is the exact failure the name describes.
+
+Each class is now checked against the base event plus its own definition, read from
+`schema.ocsf.io/api/1.9.0/classes/<name>` with every profile applied. The same mutation now fails
+on 1001, 1006, 1007 and 6002 — the four classes that do not define `src_endpoint` — and passes on
+the three that do.
+
+Turning it on found a real violation. `user` was stamped on every record, and among the classes
+this plugin emits only Authorize Session defines it, so six of seven record classes carried an
+attribute their schema forbids. It is now emitted only on 3003, where the class requires it. The
+account behind every other record is `actor.user`, which every class defines and which was already
+being emitted alongside it.
+
+The table is narrowed to the attributes this plugin can emit rather than transcribing all ~70 per
+class. That makes it stricter than OCSF: emitting an attribute a class does define but this plugin
+has not emitted before fails until the table is updated. That is the intended cost — the entry is
+one line, and the alternative is a set large enough to stop discriminating again.

@@ -30,7 +30,6 @@ nav_order: 4
     "uid": "0c6f1f1a-9c1e-4f0a-9a63-6a1a6c5f1b2e",
     "os": { "name": "linux", "type_id": 0 }
   },
-  "user": { "name": "agent", "type_id": 1 },
   "process": { "name": "curl", "cmd_line": "hmac-sha256:d7df26fddfd3af030679709c66165379" },
   "observables": [{ "name": "process.cmd_line", "type_id": 8, "value": "hmac-sha256:d7df26…" }],
   "unmapped": {
@@ -54,6 +53,13 @@ Every OCSF class is `additionalProperties: false`, so the extension attributes l
 host agent has no cloud deployment and no open-source intelligence — and `metadata.profiles`
 declares both, because an attribute whose profile is undeclared fails validation just as an
 undefined one does.
+
+The same rule decides where a class-owned attribute may appear. `src_endpoint` is only on API
+Activity, Authorize Session and HTTP Activity records; the top-level `user` object is only on
+Authorize Session, which is the one class this plugin emits that defines it. The account behind
+every other record is `actor.user`, which every class does define. The conformance suite checks
+each class against its own OCSF definition rather than the union of all seven, because the union
+accepts exactly the stampings `additionalProperties: false` rejects.
 
 ## Event mapping
 
