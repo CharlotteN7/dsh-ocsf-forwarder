@@ -1,0 +1,10 @@
+title: dsh-ocsf-forwarder
+description: A read-side SIEM forwarder for DeepSeek Harness — session events normalised to OCSF 1.9.0 and shipped to Splunk or OTLP.
+theme: jekyll-theme-primer
+show_downloads: false
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
