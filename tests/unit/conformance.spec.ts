@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { Forwarder, type ForwardableSession } from '../../src/forwarder.ts'
+import { AttestingSink, RECORD_INTEGRITY_PROFILE } from '../../src/integrity/attest.ts'
 import type { MappableEvent } from '../../src/map/index.ts'
 import { CLASS } from '../../src/ocsf/constants.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
@@ -48,23 +49,94 @@ const BASE_EVENT_ATTRIBUTES: readonly string[] = [
  * change, and updating this table is how it gets made.
  */
 const CLASS_ATTRIBUTES: Readonly<Record<number, readonly string[]>> = Object.freeze({
-  [CLASS.fileSystemActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'message_context'],
-  [CLASS.scheduledJobActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'job', 'message_context'],
-  [CLASS.processActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'message_context', 'process'],
+  [CLASS.fileSystemActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'file', 'message_context'],
+  [CLASS.scheduledJobActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'job', 'message_context'],
+  [CLASS.processActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'message_context', 'process'],
   [CLASS.authorizeSession]: [
-    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'http_request', 'message_context',
-    'privileges', 'src_endpoint', 'user',
+    'actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'http_request',
+    'message_context', 'privileges', 'src_endpoint', 'user',
   ],
   [CLASS.httpActivity]: [
-    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'file', 'http_request',
+    'actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'file', 'http_request',
     'message_context', 'src_endpoint',
   ],
-  [CLASS.applicationLifecycle]: ['actor', 'ai_agent', 'ai_model', 'api', 'application', 'delegation', 'device', 'message_context'],
+  [CLASS.applicationLifecycle]: [
+    'actor', 'ai_agent', 'ai_model', 'api', 'application', 'attestation_list', 'delegation', 'device',
+    'message_context',
+  ],
   [CLASS.apiActivity]: [
-    'actor', 'ai_agent', 'ai_model', 'api', 'delegation', 'device', 'http_request', 'message_context',
-    'src_endpoint',
+    'actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'http_request',
+    'message_context', 'src_endpoint',
   ],
 })
+
+/**
+ * The objects the `record_integrity` profile brings, each attribute mapped to
+ * the JSON type its OCSF type resolves to, and marked when the object requires
+ * it. Read from `schema.ocsf.io/api/1.9.0/objects/<name>`; `attestation_list`
+ * itself is `is_array` on every class that defines it.
+ *
+ * An OCSF object is closed exactly as a class is, so this is the same check as
+ * the per-class one above, applied one level down: emitting `chain_id` instead
+ * of `chain_uid`, or a hex string where an integer id belongs, would produce
+ * records that validate nowhere and that no consumer could join on.
+ */
+const PROFILE_OBJECTS: Readonly<Record<string, Readonly<Record<string, { type: string; required?: true }>>>> = Object.freeze({
+  attestation: {
+    uid: { type: 'string' },
+    chain_uid: { type: 'string' },
+    authority_uid: { type: 'string' },
+    prev_event: { type: 'object' },
+    fingerprint: { type: 'object' },
+    signatures: { type: 'object' },
+  },
+  prev_event: {
+    uid: { type: 'string', required: true },
+    type_uid: { type: 'number' },
+    fingerprint: { type: 'object' },
+  },
+  fingerprint: {
+    value: { type: 'string', required: true },
+    algorithm: { type: 'string' },
+    algorithm_id: { type: 'number', required: true },
+    encoding: { type: 'string' },
+    encoding_id: { type: 'number' },
+    serialization: { type: 'string' },
+    serialization_id: { type: 'number' },
+  },
+})
+
+/** Which object type each nested attribute of the profile carries. */
+const PROFILE_OBJECT_OF_ATTRIBUTE: Readonly<Record<string, string>> = Object.freeze({
+  prev_event: 'prev_event',
+  fingerprint: 'fingerprint',
+})
+
+/**
+ * Check one emitted object against its schema definition, and everything it
+ * nests.
+ * @param name - the OCSF object name.
+ * @param value - the object as emitted.
+ * @returns one entry per violation, naming the attribute.
+ */
+function objectViolations(name: string, value: Readonly<Record<string, unknown>>): string[] {
+  const definition = PROFILE_OBJECTS[name] as Readonly<Record<string, { type: string; required?: true }>>
+  const violations: string[] = []
+  for (const [key, required] of Object.entries(definition)) {
+    if (required.required === true && value[key] === undefined) violations.push(`${name}.${key}: missing, and required`)
+  }
+  for (const [key, member] of Object.entries(value)) {
+    const attribute = definition[key]
+    if (attribute === undefined) {
+      violations.push(`${name}.${key}: not defined by the object`)
+      continue
+    }
+    if (typeof member !== attribute.type) violations.push(`${name}.${key}: ${typeof member}, not ${attribute.type}`)
+    const nested = PROFILE_OBJECT_OF_ATTRIBUTE[key]
+    if (nested !== undefined) violations.push(...objectViolations(nested, member as Record<string, unknown>))
+  }
+  return violations
+}
 
 /** One run covering every mapper, driven the way the session store drives one. */
 function emitted(): readonly OcsfRecord[] {
@@ -73,7 +145,10 @@ function emitted(): readonly OcsfRecord[] {
     fleet: { installUid: 'install-test', tenantUid: 'acme', labels: ['prod'], tags: { owner: 'soc' } },
   })
   const records: OcsfRecord[] = []
-  const sink: Sink = { write: record => { records.push(record) }, close: () => {} }
+  const collector: Sink = { write: record => { records.push(record) }, close: () => {} }
+  // The lane as it is actually assembled: the forwarder writes through the
+  // chain, so the records checked here are the ones a consumer receives.
+  const sink: Sink = new AttestingSink(collector, 'chain-conformance')
   const events: MappableEvent[] = [
     { type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } },
     { type: 'request/context', seq: 1, time: 1_001, data: { provider: 'deepseek', model: 'deepseek-chat' } },
@@ -161,6 +236,23 @@ describe('OCSF 1.9.0 conformance', () => {
       expect(record.metadata.profiles).toContain('ai_operation')
       if (record.cloud !== undefined) expect(record.metadata.profiles).toContain('cloud')
       if (record.osint !== undefined) expect(record.metadata.profiles).toContain('osint')
+      if (record.attestation_list !== undefined) expect(record.metadata.profiles).toContain(RECORD_INTEGRITY_PROFILE)
+    }
+  })
+
+  it('fills the record_integrity objects with the attributes the schema defines, and no others', () => {
+    const violations = new Set(records.flatMap((record) => {
+      const list = record.attestation_list ?? []
+      return list.flatMap(attestation => objectViolations('attestation', attestation as unknown as Record<string, unknown>))
+    }))
+    expect([...violations].sort()).toEqual([])
+  })
+
+  it('meets the attestation constraint at_least_one: [fingerprint, signatures] on every record', () => {
+    expect(records.length).toBeGreaterThan(0)
+    for (const record of records) {
+      expect(record.attestation_list).toHaveLength(1)
+      expect(record.attestation_list?.[0]?.fingerprint?.value).toMatch(/^[0-9a-f]{64}$/)
     }
   })
 

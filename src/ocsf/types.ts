@@ -63,14 +63,60 @@ export interface OcsfMetadata {
   readonly extensions?: readonly OcsfExtension[]
   readonly log_provider?: string
   readonly log_name?: string
-  /** Idempotency key: `<session id>:<event seq>`. */
-  readonly uid?: string
+  /**
+   * Idempotency key: `<session id>:<event seq>`. Required rather than optional
+   * because a chained record's successor references it as `prev_event.uid`, and
+   * a link to nothing is not a link.
+   */
+  readonly uid: string
   /** Joins the records of one tool call, approval, turn, or step. */
   readonly correlation_uid?: string
   /** The session-log sequence number, so a consumer can detect gaps. */
   readonly sequence?: number
   /** When this plugin produced the record, as opposed to when the activity happened. */
   readonly logged_time?: number
+}
+
+/**
+ * A `fingerprint` object: a hash over some canonical serialization, with the
+ * algorithm and the encoding of `value` named by their OCSF enum ids.
+ *
+ * The `algorithm` and `encoding` string siblings are omitted. Both are defined
+ * as the caption of their id, so they carry no information a reader holding the
+ * schema does not have, and every record carries two of these objects.
+ */
+export interface OcsfFingerprint {
+  readonly value: string
+  readonly algorithm_id: number
+  readonly encoding_id: number
+}
+
+/** A `prev_event` reference: the previous entry of a tamper-evident chain. */
+export interface OcsfPrevEvent {
+  /** The previous record's `metadata.uid`. */
+  readonly uid: string
+  /** The previous record's `type_uid`, which names the class it is stored under. */
+  readonly type_uid: number
+  readonly fingerprint: OcsfFingerprint
+}
+
+/**
+ * One `attestation` of the `record_integrity` profile.
+ *
+ * `signatures` and `authority_uid` are deliberately absent: this producer holds
+ * no signing credential, so there is no identity to bind and none to name. The
+ * class constraint `at_least_one: [fingerprint, signatures]` is met by the
+ * fingerprint.
+ */
+export interface OcsfAttestation {
+  /** This entry's position in its chain, as `<chain_uid>:<index>`. */
+  readonly uid: string
+  /** The chain this entry belongs to: one spool file written by one process. */
+  readonly chain_uid: string
+  /** Absent on the genesis entry of a chain. */
+  readonly prev_event?: OcsfPrevEvent
+  /** Hash of this record's canonical serialization, less this field. */
+  readonly fingerprint: OcsfFingerprint
 }
 
 /** One typed observable extracted from a record. */
@@ -211,6 +257,8 @@ export interface OcsfRecord {
   readonly end_time?: number
   readonly duration?: number
   readonly observables?: readonly OcsfObservable[]
+  /** The `record_integrity` profile's attestations; present when attesting is on. */
+  readonly attestation_list?: readonly OcsfAttestation[]
   readonly ai_agent?: OcsfAiAgent
   readonly ai_model?: OcsfAiModel
   readonly message_context?: OcsfMessageContext

@@ -35,7 +35,11 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "dsh-ocsf-verify": "bin/dsh-ocsf-verify.mjs"
+  },
   "files": [
+    "bin/dsh-ocsf-verify.mjs",
     "lib/**/*.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",

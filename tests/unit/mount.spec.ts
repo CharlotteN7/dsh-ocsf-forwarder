@@ -7,6 +7,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../../src/index.ts'
 import { Config, inject, name } from '../../src/index.ts'
+import { verifyRecords } from '../../src/integrity/verify.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import { dshOf } from './support.ts'
 
@@ -52,10 +53,14 @@ async function mounted(overrides: Partial<Parameters<typeof Config>[0]> = {}): P
   return { ctx, spoolPath, unload: async () => { await fiber.dispose() } }
 }
 
+/** The spool file's lines, exactly as they were written. */
+function lines(spoolPath: string): string[] {
+  return readFileSync(spoolPath, 'utf8').split('\n').filter(line => line.length > 0)
+}
+
 /** Records the plugin spooled, in order. */
 function spooled(spoolPath: string): OcsfRecord[] {
-  return readFileSync(spoolPath, 'utf8').split('\n').filter(line => line.length > 0)
-    .map(line => JSON.parse(line) as OcsfRecord)
+  return lines(spoolPath).map(line => JSON.parse(line) as OcsfRecord)
 }
 
 /** Whether one record is the forwarder reporting on itself rather than on a session. */
@@ -166,6 +171,40 @@ describe('mounting', () => {
     Object.assign(subject, { firstLiveSeq: 2, events: [] })
     ctx.emit('session/created', subject as unknown as Session)
     expect(spooled(spoolPath)).toHaveLength(1)
+  })
+
+  it('chains the spooled records, and gives the restricted lane a chain of its own', async () => {
+    const restrictedPath = join(home, 'restricted.jsonl')
+    const { ctx, spoolPath, unload } = await mounted({
+      statsIntervalMs: 0,
+      restricted: { path: restrictedPath, acknowledged: true },
+    })
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    subject.events.push({ type: 'turn/end', seq: 1, time: 1_001, data: { turn: 1, reason: { kind: 'completed' } } } as SessionEvent)
+    for (const event of subject.events) emitEvent(ctx, subject, event)
+    await unload()
+
+    const soc = spooled(spoolPath)
+    const restricted = spooled(restrictedPath)
+    expect(verifyRecords([{ path: spoolPath, lines: lines(spoolPath) }]).intact).toBe(true)
+    expect(verifyRecords([{ path: restrictedPath, lines: lines(restrictedPath) }]).intact).toBe(true)
+    // Two files, two chains: a link that pointed into the other lane's file
+    // could not be checked from the file it is in.
+    const chainOf = (records: OcsfRecord[]): unknown => records[0]?.attestation_list?.[0]?.chain_uid
+    expect(chainOf(soc)).not.toBe(chainOf(restricted))
+    expect(soc[0]?.metadata.profiles).toContain('record_integrity')
+  })
+
+  it('emits no attestation and declares no profile for one when attesting is off', async () => {
+    const { ctx, spoolPath } = await mounted({ integrity: { attest: false } })
+    const subject = session('s1')
+    subject.events.push({ type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } } as SessionEvent)
+    emitEvent(ctx, subject, subject.events[0] as SessionEvent)
+
+    const record = spooled(spoolPath)[0] as OcsfRecord
+    expect(record.attestation_list).toBeUndefined()
+    expect(record.metadata.profiles).toEqual(['ai_operation', 'cloud', 'osint'])
   })
 
   it('opens the restricted lane owner-only when it is acknowledged', async () => {

@@ -146,6 +146,17 @@ export interface Config {
     /** `sourcetype` is `<prefix>:<class name>`, so one search matches every OCSF class. */
     sourcetypePrefix?: string
   }
+  /** The OCSF `record_integrity` profile: a hash chain over the spooled records. */
+  integrity?: {
+    /**
+     * Attach an `attestation` to every record. On by default: a chain a
+     * deployment has to discover and enable covers nothing until it does, and
+     * a chain that starts mid-fleet is a chain with a hole in it. Turning it
+     * off costs about 390 bytes and 20 µs a record and leaves the records
+     * otherwise unchanged.
+     */
+    attest?: boolean
+  }
   /** Fleet identity stamped into `metadata` and `device` on every record. */
   fleet?: {
     /** `metadata.tenant_uid`: the org or business-unit key a multi-team SOC filters on. */
@@ -290,6 +301,9 @@ export const Config: z<Config> = z.object({
     sourcetypePrefix: z.string().default(DEFAULT_SOURCETYPE_PREFIX),
     ...SHIPPER_FIELDS,
   }),
+  integrity: z.object({
+    attest: z.boolean().default(true),
+  }),
   fleet: z.object({
     tenantUid: z.string(),
     labels: z.array(z.string()).default([]),
@@ -362,6 +376,8 @@ export interface ResolvedConfig {
   readonly spoolHighWaterBytes: number
   readonly statsIntervalMs: number
   readonly restrictedPath: string | undefined
+  /** Whether every record carries a `record_integrity` attestation. */
+  readonly attestRecords: boolean
   readonly shipper: ResolvedShipper | undefined
   readonly fleet: ResolvedFleet
   readonly argumentValues: ArgumentPolicy
@@ -728,6 +744,7 @@ export function resolveConfig(
     spoolHighWaterBytes: highWaterBytes,
     statsIntervalMs: assertNonNegative('statsIntervalMs', config.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS),
     restrictedPath: resolveRestrictedPath(config),
+    attestRecords: config.integrity?.attest ?? true,
     shipper: resolveShipper(config, env, hostname),
     fleet: resolveFleet(config, env, onFailure),
     argumentValues: config.privacy?.argumentValues ?? 'digest',

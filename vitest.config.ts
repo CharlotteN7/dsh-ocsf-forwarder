@@ -13,7 +13,7 @@
  * and the entries below ratchet each existing file above it. Raising one means
  * writing the test; the entry is what records that the test exists.
  *
- * Thirteen of the twenty-one source files are at 100 on all four metrics. The
+ * Fifteen of the twenty-three source files are at 100 on all four metrics. The
  * eight that are not are held exactly where they are rather than exempted, and
  * no `v8 ignore` is used anywhere: the residual gap is the absent half of a few
  * `field === undefined ? {} : { field }` spreads and of two `error instanceof
@@ -35,11 +35,13 @@ export default defineConfig({
         branches: 93.87,
         statements: 98.43,
 
-        'src/config.ts': { lines: 100, functions: 100, branches: 97.93, statements: 100 },
+        'src/config.ts': { lines: 100, functions: 100, branches: 97.95, statements: 100 },
         'src/correlate.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/delegation.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/forwarder.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
-        'src/index.ts': { lines: 100, functions: 100, branches: 94.44, statements: 100 },
+        'src/index.ts': { lines: 100, functions: 100, branches: 95.45, statements: 100 },
+        'src/integrity/attest.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
+        'src/integrity/verify.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/authorization.ts': { lines: 100, functions: 100, branches: 97.61, statements: 100 },
         'src/map/heartbeat.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/index.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },

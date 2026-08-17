@@ -11,6 +11,7 @@
  * @module dsh-ocsf-forwarder
  */
 
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
@@ -18,6 +19,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { resolveConfig, type Config } from './config.ts'
 import { discoverDelegationTools, mergeDelegationTools, type RegistryLike } from './delegation.ts'
 import { Forwarder } from './forwarder.ts'
+import { AttestingSink } from './integrity/attest.ts'
 import { createEnvironment } from './ocsf/record.ts'
 import { Shipper } from './sink/shipper.ts'
 import { FanOutSink, SpoolSink, type Sink } from './sink/spool.ts'
@@ -36,9 +38,12 @@ export type {
   ShipperConfig,
   UrlPolicy,
 } from './config.ts'
-export type { OcsfRecord } from './ocsf/types.ts'
+export type { OcsfAttestation, OcsfFingerprint, OcsfPrevEvent, OcsfRecord } from './ocsf/types.ts'
 export type { Transport, BatchOutcome } from './sink/transport.ts'
 export { Forwarder } from './forwarder.ts'
+export { AttestingSink, RECORD_INTEGRITY_PROFILE, attestRecord, canonicalJson, fingerprintOf } from './integrity/attest.ts'
+export { formatReport, spoolFiles, verifyRecords } from './integrity/verify.ts'
+export type { ChainFinding, ChainSummary, FindingKind, SpoolSource, VerifyReport } from './integrity/verify.ts'
 
 /** Display metadata; labels the plugin in Cordis diagnostics. */
 export const name = 'dsh-ocsf-forwarder'
@@ -109,7 +114,19 @@ export function apply(ctx: Context, config: Config): void {
     : new Shipper(resolved.shipper, resolved.spoolPath, undefined, report)
   shipper?.start()
 
-  const forwarder = new Forwarder(env, resolved, soc, restricted, report)
+  // One chain per lane: the two lanes are different files carrying different
+  // records, and a link that points into the other file cannot be checked from
+  // the file it is in. A fresh uid per process is what makes a chain's genesis
+  // record mean "this writer started here" rather than "everything before this
+  // was deleted".
+  const chained = (sink: Sink): Sink => (resolved.attestRecords ? new AttestingSink(sink, randomUUID()) : sink)
+  const forwarder = new Forwarder(
+    env,
+    resolved,
+    chained(soc),
+    restricted === undefined ? undefined : chained(restricted),
+    report,
+  )
 
   // Observation only: `session/event` is `@mode emit`, so nothing here can
   // change the outcome of the append it reports.

@@ -10,9 +10,15 @@
  * full forwarder run is driven over them, and the serialized records are
  * searched for all of them at once. A new leak fails this whether or not
  * anyone remembers to write a test for the field that leaked.
+ *
+ * The run is driven through the chain each lane is assembled with, so the
+ * `record_integrity` attestations are inside the text being searched: a
+ * fingerprint is a hash and cannot carry a sentinel, and this is what proves
+ * that rather than assuming it.
  */
 import { describe, expect, it } from 'vitest'
 import { Forwarder, type ForwardableSession } from '../../src/forwarder.ts'
+import { AttestingSink } from '../../src/integrity/attest.ts'
 import type { MappableEvent } from '../../src/map/index.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import type { Sink } from '../../src/sink/spool.ts'
@@ -205,8 +211,11 @@ function run(overrides: Partial<Config> = {}): { soc: OcsfRecord[]; restricted: 
   const config = testConfig(overrides)
   const soc: OcsfRecord[] = []
   const restricted: OcsfRecord[] = []
-  const socSink: Sink = { write: record => { soc.push(record) }, close: () => {} }
-  const restrictedSink: Sink = { write: record => { restricted.push(record) }, close: () => {} }
+  const socSink: Sink = new AttestingSink({ write: record => { soc.push(record) }, close: () => {} }, 'chain-soc')
+  const restrictedSink: Sink = new AttestingSink(
+    { write: record => { restricted.push(record) }, close: () => {} },
+    'chain-restricted',
+  )
   const log = events()
   const session: ForwardableSession = { id: 'S1', firstLiveSeq: 0, seq: log.length, events: log, header: { cwd: '/srv' } }
   const forwarder = new Forwarder(testEnvironment(config), config, socSink, restrictedSink, error => { throw error })
@@ -225,6 +234,14 @@ function leaked(records: readonly OcsfRecord[]): string[] {
 }
 
 describe('the SOC lane privacy invariant', () => {
+  it('attested every record it searched, so the chain is inside the searched text', () => {
+    const { soc, restricted } = run()
+    expect(soc.length).toBeGreaterThan(0)
+    for (const record of [...soc, ...restricted]) {
+      expect(record.attestation_list).toHaveLength(1)
+    }
+  })
+
   it('carries no raw argument value, message text, or command line from any surface', () => {
     // The schedule id is a durable record identifier a SOC pivots on, not
     // content, and is emitted verbatim by design; it is in the table so that

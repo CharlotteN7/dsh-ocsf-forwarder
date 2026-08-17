@@ -37,6 +37,12 @@ describe('Config validation', () => {
   it('rejects a tool class outside the configurable vocabulary', () => {
     expect(() => Config({ ...minimal, toolClasses: { my_tool: 'kernel' } } as never)).toThrow()
   })
+
+  it('attests records unless a deployment turns it off', () => {
+    expect(Config(minimal).integrity?.attest).toBe(true)
+    expect(resolveConfig(minimal).attestRecords).toBe(true)
+    expect(resolveConfig({ ...minimal, integrity: { attest: false } }).attestRecords).toBe(false)
+  })
 })
 
 describe('resolution', () => {
