@@ -60,6 +60,17 @@ describe('the canonical serialization', () => {
     expect(JSON.parse(canonicalJson(value))).toEqual(JSON.parse(JSON.stringify(value)))
   })
 
+  it('renders the two values docs/integrity.md warns a naive verifier about', () => {
+    // A sub-millisecond `hook/result.durationMs`. Python renders the same
+    // double `1e-07`, so a verifier using `json.dumps` calls a clean spool
+    // altered — one character, over the whole file.
+    expect(canonicalJson({ duration: 1e-7 })).toBe('{"duration":1e-7}')
+    expect(canonicalJson({ tiny: 1e-5, big: 1e21 })).toBe('{"big":1e+21,"tiny":0.00001}')
+    // A model-chosen argument name holding an unpaired surrogate, which
+    // ECMAScript escapes rather than emitting.
+    expect(canonicalJson({ key: 'bad\uD800key' })).toBe('{"key":"bad\\ud800key"}')
+  })
+
   it('hashes with SHA-256 and reports the algorithm and encoding OCSF names', () => {
     expect(fingerprintOf('abc')).toEqual({
       value: createHash('sha256').update('abc', 'utf8').digest('hex'),

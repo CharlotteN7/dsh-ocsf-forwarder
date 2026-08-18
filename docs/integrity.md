@@ -76,10 +76,56 @@ Two details a verifier must not get wrong:
 ### A reference verifier, in something that is not this package
 
 ```python
-import hashlib, json, sys
+import hashlib, json, math, sys
 
-def canonical(value):                      # RFC 8785, sufficient for these records
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+def jstring(text):                             # a JSON string as JSON.stringify writes one
+    out = ['"']
+    for char in text:
+        point = ord(char)
+        if char in ESCAPES:
+            out.append(ESCAPES[char])
+        elif point < 0x20 or 0xD800 <= point <= 0xDFFF:
+            out.append("\\u%04x" % point)       # ECMAScript escapes an unpaired surrogate
+        else:
+            out.append(char)
+    return "".join(out) + '"'
+
+def jnumber(value):                            # ECMAScript Number::toString, which RFC 8785 defers to
+    if value != value or value in (math.inf, -math.inf):
+        raise ValueError("JSON has no rendering for this number")
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mantissa, _, exponent = repr(abs(float(value))).partition("e")   # shortest round-tripping digits
+    whole, _, fraction = mantissa.partition(".")
+    digits = (whole + fraction).lstrip("0")
+    n = len(digits) + int(exponent or 0) - len(fraction)             # value == 0.<digits> * 10**n
+    digits = digits.rstrip("0")
+    k = len(digits)
+    if k <= n <= 21:
+        return sign + digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * -n + digits
+    tail = "e" + ("+" if n > 0 else "-") + str(abs(n - 1))
+    return sign + digits[0] + ("" if k == 1 else "." + digits[1:]) + tail
+
+def canonical(value):                          # RFC 8785
+    if value is None:
+        return "null"
+    if value is True or value is False:
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return jstring(value)
+    if isinstance(value, (int, float)):
+        return jnumber(value)
+    if isinstance(value, list):
+        return "[" + ",".join(canonical(item) for item in value) + "]"
+    order = lambda key: key.encode("utf-16-be", "surrogatepass")     # by UTF-16 code unit
+    return "{" + ",".join(jstring(k) + ":" + canonical(value[k]) for k in sorted(value, key=order)) + "}"
 
 prev = None
 for path in sys.argv[1:]:                  # generations oldest first, then the live file
@@ -89,8 +135,8 @@ for path in sys.argv[1:]:                  # generations oldest first, then the 
         claimed = attestation["fingerprint"]["value"]
         bare = {k: v for k, v in attestation.items() if k not in ("fingerprint", "signatures")}
         covered = dict(record, attestation_list=[bare])
-        actual = hashlib.sha256(canonical(covered).encode("utf-8")).hexdigest()
-        if actual != claimed:
+        text = canonical(covered).encode("utf-8", "surrogatepass")
+        if hashlib.sha256(text).hexdigest() != claimed:
             sys.exit(f"{path}:{number} altered")
         if prev is not None and attestation.get("prev_event", {}).get("fingerprint", {}).get("value") != prev:
             sys.exit(f"{path}:{number} broken link")
@@ -98,10 +144,23 @@ for path in sys.argv[1:]:                  # generations oldest first, then the 
 print("intact")
 ```
 
-Python's `json.dumps` matches RFC 8785 for these records: every number in them is an integer, and
-every object key is ASCII, which is where its number formatting and its code-point key ordering
-would otherwise differ from ECMAScript's. A verifier for records from another producer should use a
-real JCS implementation.
+`json.dumps(record, sort_keys=True, separators=(",", ":"))` is **not** a substitute, and the three
+places it differs are all reachable from a clean spool:
+
+- **Numbers.** RFC 8785 renders a number as ECMAScript's `Number::toString` does; Python's does not
+  agree with it. A `hook/result` with a sub-millisecond `durationMs` emits `"duration":1e-7`, which
+  Python writes `1e-07` — one character, a whole spool reported as `altered`. `1e-5` and `1e21`
+  differ too, and both reach a record as tool-argument values under `privacy.argumentValues: full`.
+- **Unpaired surrogates.** A model chooses its own argument names, and one holding a lone surrogate
+  reaches `unmapped.dsh.arguments[].key`. ECMAScript escapes it as `\ud800`; Python emits the raw
+  code point and then `.encode("utf-8")` raises `UnicodeEncodeError` — the verifier does not report
+  a wrong answer, it stops.
+- **Key order.** Keys sort by UTF-16 code unit, not by code point. Every key OCSF defines is ASCII,
+  where the two agree, but `extension.name` is a deployment string and becomes an object key.
+
+`dsh-ocsf-verify` handles all three, because it re-serializes through the same `JSON.stringify` the
+spool was written with. A verifier for records from another producer should use a real JCS
+implementation rather than either of these.
 
 ## Chains, rotation, and gaps
 
