@@ -153,11 +153,16 @@ export function apply(ctx: Context, config: Config): void {
   const mountedAt = Date.now()
   const tick = (final: boolean): void => {
     const stats = forwarder.stats()
+    const pressure = soc.pressure()
+    // `forwarded` counts records handed to the sink, which is not the same as
+    // records on disk: a spool that lost its descriptor accepts nothing and
+    // counts every one of them under `sink_dropped`. Reporting only the
+    // forwarder's own counters made a dead sink read `forwarded=3 dropped=0`.
     ctx.logger.info(
       `ocsf-forwarder: forwarded=${String(stats.forwarded)} dropped=${String(stats.dropped)} `
-      + `unreadable=${String(stats.unreadable)} failed=${String(stats.failed)}`,
+      + `unreadable=${String(stats.unreadable)} failed=${String(stats.failed)} `
+      + `sink_dropped=${String(pressure.droppedRecords)} sink_failed=${String(pressure.sinkFailed)}`,
     )
-    const pressure = soc.pressure()
     forwarder.heartbeat({
       liveSessions: ctx.sessions.list().length,
       stats,
