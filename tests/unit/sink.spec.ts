@@ -1,5 +1,5 @@
 /** The spool's durability behaviour and the shipper's cursor discipline. */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -699,6 +699,101 @@ describe('the shipper', () => {
         return found === null ? [] : [found[0]]
       })
     expect(written.filter(uid => !seen.includes(uid) && !onDisk.includes(uid))).toEqual([])
+  })
+
+  // The identity probe has to answer for a path that names nothing: rotation
+  // renames the spool away, and an operator or a cleanup job can remove it
+  // outright. Answering "no identity" makes the drain abandon its pass, which
+  // is the safe direction — a re-send rather than an offset into a file that
+  // no longer exists.
+  it('abandons the pass when the spool disappears mid-batch', async () => {
+    const spoolPath = join(home, 'vanish.jsonl')
+    const resolved = resolveConfig({
+      spoolPath,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318', batchSize: 1 },
+    })
+    let posts = 0
+    const instance = new Shipper(resolved.shipper!, spoolPath, async () => {
+      posts += 1
+      if (posts === 1) rmSync(spoolPath)
+      return 'accepted'
+    })
+    writeFileSync(spoolPath, `${JSON.stringify(record('v1'))}\n${JSON.stringify(record('v2'))}\n`)
+
+    await instance.drain()
+    // The cursor never moved onto a file that had gone, so nothing was stepped
+    // over; the records are re-sent from where they were when it recreates.
+    expect(instance.cursor()).toBe(0)
+  })
+
+  // A cursor whose file matches none of the newly appeared generations cannot
+  // be attributed. Dropping it re-ships each generation from its first byte —
+  // duplicates, which at-least-once allows — instead of guessing an owner and
+  // skipping a head.
+  it('drops an offset it cannot attribute to a generation', async () => {
+    const spoolPath = join(home, 'orphan.jsonl')
+    const resolved = resolveConfig({
+      spoolPath,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318', batchSize: 10 },
+    })
+    const seen: string[] = []
+    const instance = new Shipper(resolved.shipper!, spoolPath, async (_transport, body) => {
+      for (const found of JSON.stringify(body).matchAll(/O:\w+/g)) seen.push(found[0])
+      return 'accepted'
+    })
+
+    writeFileSync(spoolPath, `${JSON.stringify(record('O:a'))}\n`)
+    await instance.drain()
+    expect(instance.cursor()).toBeGreaterThan(0)
+
+    // Replace the live file rather than renaming it, so the recorded identity
+    // belongs to no file on disk, then rotate a different file into place.
+    rmSync(spoolPath)
+    writeFileSync(spoolPath, `${JSON.stringify(record('O:b'))}\n`)
+    const generation = `${spoolPath}.2026-08-18T00-00-00.000Z-001`
+    writeFileSync(generation, `${JSON.stringify(record('O:c'))}\n`)
+
+    await instance.drain()
+    // O:c is delivered from the generation's first byte rather than skipped.
+    expect(seen).toContain('O:c')
+  })
+
+  // A restarted shipper reads its cursor off disk but has no in-memory record
+  // of which file that offset counted. If a rotation happened while it was
+  // down, it cannot attribute the offset, so it re-ships the generation whole
+  // rather than assuming the offset belongs to the oldest one.
+  it('re-ships a whole generation when a restart cannot attribute its cursor', async () => {
+    const spoolPath = join(home, 'restart-carry.jsonl')
+    const seen: string[] = []
+    const make = (): Shipper => {
+      const resolved = resolveConfig({
+        spoolPath,
+        fleet: { installUid: 'install-test' },
+        otlp: { endpoint: 'http://collector:4318', batchSize: 10 },
+      })
+      return new Shipper(resolved.shipper!, spoolPath, async (_transport, body) => {
+        for (const found of JSON.stringify(body).matchAll(/K:\w+/g)) seen.push(found[0])
+        return 'accepted'
+      })
+    }
+
+    writeFileSync(spoolPath, `${JSON.stringify(record('K:a'))}\n`)
+    await make().drain()
+
+    // Down it goes. A rotation lands while nothing is running, then a fresh
+    // process starts with only the persisted cursor to go on.
+    const generation = `${spoolPath}.2026-08-18T00-00-00.000Z-002`
+    renameSync(spoolPath, generation)
+    writeFileSync(spoolPath, `${JSON.stringify(record('K:c'))}\n`)
+    seen.length = 0
+
+    await make().drain()
+    // K:a arrives again — a duplicate, which the record's own uid deduplicates —
+    // rather than the generation being drained from the middle.
+    expect(seen).toContain('K:a')
+    expect(seen).toContain('K:c')
   })
 
   it('resumes from the persisted cursor after a restart', async () => {
