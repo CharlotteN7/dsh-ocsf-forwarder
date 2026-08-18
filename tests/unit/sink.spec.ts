@@ -629,6 +629,78 @@ describe('the shipper', () => {
     expect(instance.cursor()).toBe(statSync(path).size)
   })
 
+  // The spool and the shipper share a process, so a rotation can land while a
+  // batch is in flight. Before this was guarded, the shipper wrote a
+  // pre-rotation offset into the post-rotation cursor, read from it into a
+  // different file, landed mid-record, reported the fragment as a JSON error
+  // and stepped the cursor past undelivered records; `carryCursor` then handed
+  // the same stale offset to the new generation, whose head was skipped before
+  // it was unlinked. A soak against a healthy collector lost 3-4% of records
+  // that way while `quarantinedCount()` reported zero. The sizes below are
+  // chosen so the stale offset lands inside a record of the new live file,
+  // which is the shape that makes the loss silent rather than merely noisy.
+  it('loses no record when a rotation lands while a batch is in flight', async () => {
+    const spoolPath = join(home, 'race.jsonl')
+    // Built here rather than from `record()`: the byte arithmetic below is the
+    // point of the test, so the base must be small enough that every target
+    // size is reachable by padding.
+    const sized = (uid: string, bytes: number): OcsfRecord => {
+      const base = {
+        class_uid: 1007,
+        type_uid: 100701,
+        time: 1_700_000_000_000,
+        severity_id: 1,
+        metadata: { uid },
+        pad: '',
+      }
+      const overhead = JSON.stringify(base).length + 1
+      return { ...base, pad: 'x'.repeat(Math.max(0, bytes - overhead)) } as unknown as OcsfRecord
+    }
+    const resolved = resolveConfig({
+      spoolPath,
+      fleet: { installUid: 'install-test' },
+      otlp: { endpoint: 'http://collector:4318', batchSize: 1 },
+    })
+    const spool = new SpoolSink({
+      path: spoolPath,
+      maxBytes: 1000,
+      maxGenerations: 64,
+      maxTotalBytes: 1 << 30,
+      mode: 0o640,
+      onWarn: () => {},
+    })
+
+    const seen: string[] = []
+    let posts = 0
+    const instance = new Shipper(resolved.shipper!, spoolPath, async (_transport, body) => {
+      posts += 1
+      for (const found of JSON.stringify(body).matchAll(/R:\w+/g)) seen.push(found[0])
+      if (posts === 1) {
+        // 480 live + 520 reaches maxBytes exactly and rotates; the fresh live
+        // file is then 600 bytes, so the stale 480 offset is inside it.
+        spool.write(sized('R:F0', 520))
+        spool.write(sized('R:B0', 600))
+      }
+      // A real async boundary: the drain resumes after the rotation has landed,
+      // which is the ordering that makes the offset stale.
+      await new Promise(resolve => { setTimeout(resolve, 20) })
+      return 'accepted'
+    })
+
+    const written = ['R:A0', 'R:A1', 'R:A2', 'R:A3', 'R:F0', 'R:B0']
+    for (let index = 0; index < 4; index += 1) spool.write(sized(`R:A${String(index)}`, 120))
+    for (let pass = 0; pass < 4; pass += 1) await instance.drain()
+    spool.close()
+
+    const onDisk = [spoolPath, ...rotatedGenerations(spoolPath)]
+      .flatMap(file => readFileSync(file, 'utf8').split('\n').filter(line => line.length > 0))
+      .flatMap(line => {
+        const found = /R:\w+/.exec(line)
+        return found === null ? [] : [found[0]]
+      })
+    expect(written.filter(uid => !seen.includes(uid) && !onDisk.includes(uid))).toEqual([])
+  })
+
   it('resumes from the persisted cursor after a restart', async () => {
     const posted: unknown[] = []
     const { instance, path, cursor } = shipper(async (_transport, body) => { posted.push(body); return 'accepted' })

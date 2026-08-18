@@ -56,6 +56,9 @@ export class Shipper {
   private quarantined = 0
   /** How far each rotated generation was drained in this process. */
   private readonly generationOffsets = new Map<string, number>()
+
+  /** `dev:ino` of the file the live cursor's offset counts bytes of. */
+  private cursorIdentity: string | undefined
   /** Generations already accounted for, so a newly appeared one is recognisable. */
   private readonly knownGenerations = new Set<string>()
 
@@ -153,11 +156,22 @@ export class Shipper {
   private carryCursor(generations: readonly string[]): void {
     const fresh = generations.filter(generation => !this.knownGenerations.has(generation))
     for (const generation of generations) this.knownGenerations.add(generation)
-    const oldest = fresh[0]
-    if (oldest === undefined) return
+    if (fresh.length === 0) return
     const carried = this.cursor()
     if (carried === 0) return
-    this.generationOffsets.set(oldest, carried)
+    // Which generation this offset belongs to is a question of file identity,
+    // not of position. Taking the oldest is right only when exactly one
+    // rotation happened since it was written; if the shipper advanced the
+    // cursor between two rotations the offset indexes the *newest* fresh
+    // generation, and carrying it onto the oldest skips that generation's head
+    // before the drain calls it complete and unlinks it.
+    const owner = this.cursorIdentity === undefined
+      ? undefined
+      : fresh.find(generation => fileIdentity(generation) === this.cursorIdentity)
+    // Without a match we cannot say which file the offset counts. Dropping it
+    // re-ships each generation from its first byte: duplicates, not a gap.
+    if (owner !== undefined) this.generationOffsets.set(owner, carried)
+    this.cursorIdentity = undefined
     writeFileSync(this.options.cursorPath, '0')
   }
 
@@ -183,7 +197,10 @@ export class Shipper {
     const live = await this.drainFile(
       this.spoolPath,
       () => this.cursor(),
-      offset => { writeFileSync(this.options.cursorPath, String(offset)) },
+      offset => {
+        this.cursorIdentity = fileIdentity(this.spoolPath)
+        writeFileSync(this.options.cursorPath, String(offset))
+      },
     )
     return shipped + live.shipped
   }
@@ -199,7 +216,13 @@ export class Shipper {
   ): Promise<FileProgress> {
     let shipped = 0
     for (;;) {
-      const size = statSync(path).size
+      const opened = statSync(path)
+      const size = opened.size
+      // `drainFile` addresses the spool by path and byte offset across an
+      // `await`, and the spool rotates in this same process, so the path can
+      // name a different file by the time a batch settles. An offset written
+      // then counts bytes of a file this path no longer names.
+      const identity = `${String(opened.dev)}:${String(opened.ino)}`
       let from = readOffset()
       if (size < from) {
         // The file shrank under the cursor: it was truncated or replaced.
@@ -256,6 +279,10 @@ export class Shipper {
         }
         // Each spooled line contributes its own bytes plus its newline.
         offset += slice.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0)
+        // Rotation landed while this batch was in flight. Leaving the cursor
+        // alone costs a re-send next pass, which at-least-once already allows;
+        // writing it here would step the cursor over undelivered records.
+        if (fileIdentity(path) !== identity) return { shipped, drained: false }
         saveOffset(offset)
       }
     }
@@ -289,5 +316,22 @@ export class Shipper {
       `ocsf-forwarder: ${this.options.transport.kind} destination refused ${String(lines.length)} record(s); `
       + `quarantined to ${this.options.quarantinePath}`,
     ))
+  }
+}
+
+/**
+ * `dev:ino` of a path, or `undefined` when it names nothing.
+ *
+ * Two files share one path over time — rotation renames the spool out from
+ * under it — so this pair, not the path, identifies the bytes an offset counts.
+ * @param path - the path to identify.
+ * @returns the identity, or `undefined` when the path could not be read.
+ */
+function fileIdentity(path: string): string | undefined {
+  try {
+    const entry = statSync(path)
+    return `${String(entry.dev)}:${String(entry.ino)}`
+  } catch {
+    return undefined
   }
 }
