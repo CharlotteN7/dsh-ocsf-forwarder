@@ -67,6 +67,16 @@ describe('the canonical serialization', () => {
       encoding_id: FINGERPRINT_ENCODING_ID,
     })
   })
+
+  it('pins the algorithm and encoding ids to the OCSF enum values third parties verify against', () => {
+    // Written as literals rather than through the constants: `docs/integrity.md`
+    // publishes SHA-256 and hex as facts a reader recomputes a chain from, and
+    // an assertion that names the constant agrees with whatever it is changed
+    // to.
+    expect(FINGERPRINT_ALGORITHM_ID).toBe(3)
+    expect(FINGERPRINT_ENCODING_ID).toBe(1)
+    expect(fingerprintOf('abc').value).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  })
 })
 
 describe('one attestation', () => {
