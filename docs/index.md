@@ -27,8 +27,9 @@ nav_order: 1
   against.
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.
 - Keeps raw values out of the SOC lane: keyed digests, value classifications, and lengths instead.
-  File paths, tool names, executable names, and bounded enumerations are the exceptions, and they
-  are listed in [Two lanes](operations.md#two-lanes).
+  File paths, tool names, executable names, durable identifiers, the names a model gives its own
+  tool arguments, and a short list of enumerated outcomes are the exceptions, listed in full — with
+  what "enumerated" does and does not guarantee — in [Two lanes](operations.md#two-lanes).
 
 ## What it does not do
 
