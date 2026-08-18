@@ -119,6 +119,16 @@ describe('resolution', () => {
     expect(resolved.shipper?.transport.endpoint).toBe('http://collector:4318/ingest/logs')
   })
 
+  it('keeps a query string a collector routes on when it appends the default path', () => {
+    // A tenant selector on a bare endpoint was dropped: every batch went to
+    // the collector's default tenant and nothing said so.
+    const bare = resolveConfig({ ...minimal, otlp: { endpoint: 'https://collector.test/?tenant=7' } })
+    expect(bare.shipper?.transport.endpoint).toBe('https://collector.test/v1/logs?tenant=7')
+
+    const pathed = resolveConfig({ ...minimal, otlp: { endpoint: 'https://collector.test/ingest?tenant=7' } })
+    expect(pathed.shipper?.transport.endpoint).toBe('https://collector.test/ingest?tenant=7')
+  })
+
   it('rejects an endpoint that is not a URL', () => {
     expect(() => resolveConfig({ ...minimal, otlp: { endpoint: 'http://[' } })).toThrow(/not a valid URL/)
   })
@@ -323,6 +333,13 @@ describe('numeric bounds', () => {
   it('refuses a fractional batch size, because a batch is a count of records', () => {
     expect(() => resolveConfig({ ...minimal, otlp: { endpoint: 'http://collector:4318', batchSize: 2.5 } }))
       .toThrow(/otlp\.batchSize must be a positive integer/)
+  })
+
+  it('leaves a shipper block unvalidated until its endpoint opens the shipper', () => {
+    // Not a bound that is enforced everywhere: a block with no endpoint
+    // configures no shipper, so nothing in it is resolved and `batchSize: 0`
+    // loads without complaint.
+    expect(resolveConfig({ ...minimal, splunk: { batchSize: 0 } }).shipper).toBeUndefined()
   })
 
   it('names the destination block a bad delivery limit came from', () => {

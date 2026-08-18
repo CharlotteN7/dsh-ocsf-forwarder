@@ -504,6 +504,11 @@ function resolveRestrictedPath(config: Config): string | undefined {
 
 /**
  * Parse and validate one configured destination URL.
+ *
+ * A query string survives the default path being appended. A collector that
+ * routes on `?tenant=7` is a real deployment, and resolving that endpoint to a
+ * path with no query — which is what constructing the URL from the default
+ * alone did — sent every batch to the wrong tenant with nothing to say so.
  * @param key - the configuration key, named in any failure message.
  * @param endpoint - the URL as configured.
  * @param defaultPath - the path appended when the URL carries none.
@@ -520,7 +525,10 @@ function destinationUrl(key: string, endpoint: string, defaultPath: string): str
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`ocsf-forwarder: ${key} must be an http or https URL, got "${endpoint}"`)
   }
-  return url.pathname === '/' ? new URL(defaultPath, url).href : url.href
+  if (url.pathname !== '/') return url.href
+  const resolved = new URL(defaultPath, url)
+  resolved.search = url.search
+  return resolved.href
 }
 
 /**
