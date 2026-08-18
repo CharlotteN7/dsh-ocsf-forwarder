@@ -40,7 +40,9 @@ fault; it is graded as one so that a genuinely malformed batch cannot block ever
 
 **Splunk configuration.** There is no official Splunk add-on for OCSF and no Splunk-published OCSF
 sourcetype convention, so `sourcetype` and field extraction are ours to define.
-[`splunk/props.conf`](splunk/props.conf) ships beside this plugin with one stanza per class. There
+[`splunk/props.conf`](https://github.com/CharlotteN7/dsh-ocsf-forwarder/blob/main/splunk/props.conf)
+ships in the published package with one stanza per class — this site is built from `docs/`
+alone, so the link goes to the repository rather than beside this page. There
 is deliberately no `transforms.conf`: HEC sets `_time`, `host`, `source` and `sourcetype` from the
 event envelope and the payload is JSON, so nothing needs an index-time transform.
 

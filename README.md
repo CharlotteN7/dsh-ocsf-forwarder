@@ -73,10 +73,11 @@ git does not carry.
       hmacKey: { source: env, variable: DSH_OCSF_KEY }
 ```
 
-Every numeric key must be a positive finite number, and those counting records or files must be
-whole numbers — `statsIntervalMs` is the one exception, where `0` means "only at unload". A value
-outside those ranges fails at load, because the alternative is worse than a refused mount:
-`batchSize: 0` makes the shipper loop without ever advancing its cursor.
+Every numeric key that is resolved must be a positive finite number, and those counting records or
+files must be whole numbers — `statsIntervalMs` is the one exception, where `0` means "only at
+unload". A value outside those ranges fails at load, because the alternative is worse than a
+refused mount: `batchSize: 0` makes the shipper loop without ever advancing its cursor. A shipper
+block with no `endpoint` configures no shipper and is not resolved, so nothing in it is checked.
 
 The default privacy posture keeps raw values out of the SOC lane — argument values and command
 lines are digested, URLs reduced to their host. A second **restricted lane** carries verbatim

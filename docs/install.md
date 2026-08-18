@@ -46,7 +46,7 @@ install from a checkout, build first and add the tarball:
 ```sh
 git clone https://github.com/CharlotteN7/dsh-ocsf-forwarder && cd dsh-ocsf-forwarder
 pnpm install && pnpm run build && pnpm pack
-dsh plugin --profile <name> add ./dsh-ocsf-forwarder-0.1.0.tgz
+dsh plugin --profile <name> add ./dsh-ocsf-forwarder-0.5.1.tgz   # the version in package.json
 ```
 
 The bundle patch defaults the spool to `dshHomePath('ocsf/session.ocsf.jsonl')`. A profile patch

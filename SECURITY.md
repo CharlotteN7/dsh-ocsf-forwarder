@@ -15,8 +15,10 @@ This plugin is a read-side audit forwarder. The things worth reporting are:
 
 - **A raw value reaching the SOC lane.** Any path by which text composed by a
   model, a user, a provider, or a hook appears verbatim in a SOC-lane record
-  under stock configuration. `README.md` lists exactly what that lane may carry
+  under stock configuration. [Two lanes] lists exactly what that lane may carry
   verbatim; anything outside that list is a bug of this class.
+
+[Two lanes]: https://charlotten7.github.io/dsh-ocsf-forwarder/operations.html#two-lanes
 - **Records lost or destroyed.** Any way the spool, its rotated generations, or
   the shipper cursor can lose a record that was accepted for writing, other
   than the two documented and reported cases: a quarantined batch, and a

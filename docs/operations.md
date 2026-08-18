@@ -64,15 +64,33 @@ tenant is worse than an absent one, so an unconfigured field is omitted.
 
 ## Two lanes
 
-The SOC lane is metadata, classifications, keyed digests, and lengths. The values it does carry
-verbatim, because they are the security signal rather than its content, are: file paths; tool
-names; executable names, taken after any leading `NAME=VALUE` assignments are stripped; hostnames;
-URL scheme and host; and bounded enumerations such as an approval outcome, a turn end reason, a
-sandbox mode, a provider error *code*, and a hook decision drawn from the hook protocol's own
-`approve`/`allow`/`block`/`deny`/`ask`. Anything a model, a user, a provider, or a hook composed as
-free text — prompts, completions, commands, `grep` patterns, approval prompt text, provider failure
-messages, hook findings — reaches the SOC lane only as `HMAC-SHA256(key, value)` plus a character
-count.
+The SOC lane is metadata, classifications, keyed digests, and lengths. Anything a model, a user, a
+provider, or a hook composed as free text — prompts, completions, commands, `grep` patterns,
+approval prompt text, provider failure messages, compaction failures, hook findings — reaches it
+only as `HMAC-SHA256(key, value)` plus a character count.
+
+This is the complete list of what it does carry verbatim, because each is the security signal
+rather than its content:
+
+| Value | Where | Why it is not digested |
+|---|---|---|
+| File paths | `file.path`, the `file.path` observable | A path is what a detection matches on. |
+| Tool names | `unmapped.dsh.tool`, `api.operation`, `privileges[]` | The identity of the capability used. |
+| Executable names | `process.name`, after any leading `NAME=VALUE` assignments are stripped | The subject of a process launch. |
+| Hostnames, URL scheme and host | `device.hostname`, `src_endpoint`, `http_request.url` | The destination, without the query string that carries tokens. |
+| Schedule ids, goal ids, command ids, call ids, handler ids | `job.uid`, `unmapped.dsh.*_id` | Durable identifiers a SOC pivots and joins on. |
+| **Model-chosen argument names** | `unmapped.dsh.arguments[].key` | The model names its own arguments. A digest of `file_path` groups nothing and tells nobody which argument the value belonged to. The argument's **value** follows `privacy.argumentValues`. |
+| **A tool error's `name` and `code`** | `status_detail`, from `tool/result.error` | The failure class, chosen by the tool implementation rather than composed per call. |
+| **A hook's `matcher`** | `unmapped.dsh.matcher` | A deployment-authored pattern from the hook configuration, not model or user input — the one pattern on this page that is not digested, and it is deployment-trusted where a `grep` pattern is not. |
+| Enumerated outcomes | `status_detail`, `unmapped.dsh.end_reason`, `.decision`, `.mode` | See below. |
+
+**"Bounded enumeration" is a weaker claim than it reads.** Only `hook/result.decision` is actually
+reduced to a fixed set — `approve`/`allow`/`block`/`deny`/`ask`, with anything else recorded as
+`other` plus a digest. The rest are passed through as the payload wrote them: `TurnEndReasonMap`,
+`ApprovalOutcome` and the sandbox modes are merge-extensible, so a plugin outside this repository
+can put an arbitrary string in `turn/end`'s `reason.kind` and it reaches `status_detail` verbatim.
+The values are short discriminants by construction and by convention, not by enforcement. If that
+matters for your deployment, the restricted lane is not the answer — pin the plugin set.
 
 The restricted lane (`restricted.path` plus `restricted.acknowledged: true`, mode 0600) is the same
 records with the verbatim event payload in `raw_data`, joined to the SOC lane on `metadata.uid`.
@@ -95,8 +113,21 @@ The spool is written synchronously before anything is queued for shipping, so:
 
 - A killed process leaves records on disk and a cursor that stopped advancing — a visible gap, not
   silent loss. A sink that refuses a write leaves the session cursor on the unwritten event, so an
-  outage delays records rather than consuming them; the counters in the periodic
-  `forwarded=… dropped=… unreadable=… failed=…` log line say which is happening.
+  outage delays records rather than consuming them.
+
+  **Read the right half of the counter line.** `forwarded` counts records handed to the sink, not
+  records on disk: a spool that lost its descriptor accepts every record and drops it, and those
+  records are counted as forwarded. The two counters that report that are `sink_dropped` and
+  `sink_failed`, which the periodic line carries alongside the forwarder's own:
+
+  ```
+  ocsf-forwarder: forwarded=3 dropped=0 unreadable=0 failed=0 sink_dropped=3 sink_failed=true
+  ```
+
+  `dropped` is the drop *policy* — `dropEventTypes` and the built-in list — and `failed` is a
+  contained exception inside the listener. Neither says anything about the spool. Off-host, the
+  heartbeat's `sink_failed` and `sink_dropped_records` are the same two signals, at
+  `severity_id: 5`.
 - Delivery is **at-least-once**: the cursor advances only after the collector accepts a batch, so a
   crash resends. Deduplicate on `metadata.uid`.
 - Capture is **at-most-once**: `session/event` fires post-commit but **pre-durable**, so a record can
@@ -144,6 +175,19 @@ sharing one path would each rename the inode the other is writing into, so the s
 load with the pid that holds it. Give each process its own path — the bundle patch's
 `dshHomePath(...)` default already does, per `$DSH_HOME`. A lock left by a process that no longer
 exists is taken over.
+
+**The modes 0640 and 0600 cover the spool files and nothing else.** They are forced onto the spool,
+the restricted lane and the quarantine file after opening, so a permissive `umask` cannot widen
+them. Everything around them **is** umask-governed:
+
+- the **parent directories**, created with `mkdir -p` semantics: under `umask 000` they are 0777;
+- **`<spoolPath>.lock`**, created 0666 under the same umask — and its content is the holding pid,
+  which is what the one-writer guarantee reads to decide whether a lock is live.
+
+A world-writable lock file lets any local account replace the pid in it and take the path from the
+process that holds it. Set a `umask` for the agent process, or place the spool under a directory
+whose mode you control; this plugin does not set one for you, because a plugin changing the process
+umask changes it for the agent and everything else in it.
 
 **Retry and quarantine.** A batch the destination cannot take right now is retried with
 exponential backoff from `flushIntervalMs` up to `maxBackoffMs`, and the cursor does not move. A
