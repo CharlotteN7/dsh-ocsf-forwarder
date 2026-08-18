@@ -34,6 +34,17 @@ import {
   mapWorkflow,
 } from './lifecycle.ts'
 import {
+  mapAgentPresetSelected,
+  mapCommandDone,
+  mapCommandRun,
+  mapDeepSeekSearchRequest,
+  mapGoalChange,
+  mapInboxSpliced,
+  mapLlmRetry,
+  mapLlmRetryStarted,
+  mapPlanMode,
+} from './interaction.ts'
+import {
   mapCodeDispatch,
   mapCodeDispatchStart,
   mapToolCall,
@@ -92,8 +103,17 @@ export function mapEvent(
     case 'compaction/start':
     case 'compaction/end':
     case 'compaction/prune':
-    case 'compaction/summary': return mapCompaction(event.type, sessionId, event, config)
+    case 'compaction/summary': return mapCompaction(event.type, sessionId, event, state, config)
     case 'schedule/change': return mapScheduleChange(sessionId, event)
+    case 'agent/inbox/spliced': return mapInboxSpliced(event, config)
+    case 'agent-preset/selected': return mapAgentPresetSelected(event)
+    case 'command/run': return mapCommandRun(sessionId, event, state, config)
+    case 'command/done': return mapCommandDone(sessionId, event, state, config)
+    case 'goal/change': return mapGoalChange(event, config)
+    case 'llm/retry': return mapLlmRetry(sessionId, event, config)
+    case 'llm/retry-started': return mapLlmRetryStarted(sessionId, event)
+    case 'plan/mode': return mapPlanMode(event)
+    case 'web/deepseek-search-llm-request': return mapDeepSeekSearchRequest(event, config)
     // Every remaining type — including plugin-merged types this build does not
     // know — is forwarded as metadata.
     default: return mapGeneric(event.type, event)

@@ -46,6 +46,12 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
   turnError: 'SENTINEL-turnerror-x-api-key-header-echo',
   hookDecision: 'SENTINEL-hook-matched-value-4111111111111111',
   summary: 'SENTINEL-summary-the-user-said-swordfish',
+  commandArgs: 'SENTINEL-commandargs-token-ATATT3xFfGF0',
+  commandOutcome: 'SENTINEL-commandout-connection-string-pw',
+  goalObjective: 'SENTINEL-goal-rotate-the-prod-signing-key',
+  inboxInserted: 'SENTINEL-inbox-use-key-AKIA5555EXAMPLE',
+  retryFailure: 'SENTINEL-retry-upstream-echoed-authorization',
+  searchQuery: 'SENTINEL-search-who-owns-1234-5678-9012',
   scheduleId: 'SENTINEL-notasecret-schedule-id',
 })
 
@@ -200,9 +206,49 @@ function events(): MappableEvent[] {
       time: 1_029,
       data: { turn: 1, reason: { kind: 'error', error: { code: 'ETIMEDOUT', message: SENTINELS['turnError'] } } },
     },
+    { type: 'command/run', seq: 30, time: 1_030, data: { commandId: 'k1', name: 'deploy', args: SENTINELS['commandArgs'], source: 'user' } },
+    { type: 'command/done', seq: 31, time: 1_031, data: { commandId: 'k1', kind: 'error', text: SENTINELS['commandOutcome'] } },
+    {
+      type: 'goal/change',
+      seq: 32,
+      time: 1_032,
+      data: { operation: 'create', goal: { id: 'g1', revision: 1, objective: SENTINELS['goalObjective'], phase: 'active' } },
+    },
+    {
+      type: 'agent/inbox/spliced',
+      seq: 33,
+      time: 1_033,
+      data: { target: 'next-turn', start: 0, inserted: [{ content: [{ type: 'text', text: SENTINELS['inboxInserted'] }] }] },
+    },
+    {
+      type: 'llm/retry',
+      seq: 34,
+      time: 1_034,
+      data: {
+        retryId: 'r1', turn: 1, step: 0, provider: 'deepseek', mode: 'normal', policyKey: 'default',
+        retry: 1, maxRetries: 3, delayMs: 100,
+        failure: { code: 'EBADGATEWAY', message: SENTINELS['retryFailure'] },
+      },
+    },
+    { type: 'llm/retry-started', seq: 35, time: 1_035, data: { retryId: 'r1', turn: 1, step: 0, retry: 1 } },
+    { type: 'plan/mode', seq: 36, time: 1_036, data: { active: true } },
+    { type: 'agent-preset/selected', seq: 37, time: 1_037, data: { agentPreset: 'reviewer' } },
+    {
+      type: 'web/deepseek-search-llm-request',
+      seq: 38,
+      time: 1_038,
+      data: {
+        apiVersion: '2024-10-01',
+        body: {
+          model: 'deepseek-search-1',
+          max_tokens: 512,
+          messages: [{ role: 'user', content: [{ type: 'text', text: SENTINELS['searchQuery'] }] }],
+        },
+      },
+    },
     // A type this build has no mapper for takes the generic fallback, which
     // must read the payload's shape and never its content.
-    { type: 'someone-elses-plugin/event', seq: 30, time: 1_030, data: { turn: 1, note: SENTINELS['prompt'] } },
+    { type: 'someone-elses-plugin/event', seq: 39, time: 1_039, data: { turn: 1, note: SENTINELS['prompt'] } },
   ]
 }
 

@@ -143,6 +143,11 @@ export interface EventMapping {
   readonly httpRequest?: OcsfHttpRequest
   readonly job?: OcsfJob
   readonly privileges?: readonly string[]
+  /**
+   * The model this one operation ran on, when it is not the session's route —
+   * an auxiliary request, or a summarizer the compaction backend chose.
+   */
+  readonly aiModel?: OcsfAiModel
   readonly messageContext?: OcsfMessageContext
   readonly delegation?: OcsfDelegation
   readonly observables?: readonly OcsfObservable[]
@@ -251,9 +256,13 @@ export function buildRecord(
       version: env.productVersion,
       instance_uid: subject.sessionId,
       uid: subject.agentPreset,
+      // `ai_agent.ai_model` is the agent's own route; an auxiliary request
+      // served by another model does not change what the agent runs on.
       ai_model: subject.aiModel,
     }),
-    ai_model: subject.aiModel,
+    // The model that served this one operation, which is the session's route
+    // unless the event named its own.
+    ai_model: mapping.aiModel ?? subject.aiModel,
     // `message_context` constrains `at_least_one: [application, service]`. The
     // application these messages belong to is the harness, which is the same
     // one Application Lifecycle names, so it is filled in here rather than

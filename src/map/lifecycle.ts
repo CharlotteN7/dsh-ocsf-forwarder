@@ -33,8 +33,13 @@ export function stepCorrelationUid(sessionId: string, turn: number, step: number
   return `${sessionId}:${turn}:${step}`
 }
 
-/** Concatenated text of a message's content blocks; other block types contribute nothing. */
-function messageText(message: unknown): string {
+/**
+ * Concatenated text of a message's content blocks; other block types contribute
+ * nothing.
+ * @param message - a message-shaped payload, or anything else.
+ * @returns the concatenated text, empty when the value carries none.
+ */
+export function messageText(message: unknown): string {
   const content = readRecord(message)?.['content']
   if (!Array.isArray(content)) return ''
   return content.map(block => readString(block, 'text') ?? '').join('')
@@ -476,14 +481,16 @@ export function mapWorkflow(
  * because it removes model-visible history.
  * @param eventType - the session event type.
  * @param sessionId - the session the event belongs to.
- * @param event - the event's payload.
+ * @param event - the event's `time` and payload.
+ * @param state - the session's correlation state, holding the open compaction.
  * @param config - the resolved configuration, for the summary digest.
  * @returns the record mapping.
  */
 export function mapCompaction(
   eventType: string,
   sessionId: string,
-  event: { data: unknown },
+  event: { time: number; data: unknown },
+  state: SessionState,
   config: ResolvedConfig,
 ): EventMapping {
   const compactionId = readString(event.data, 'compactionId')
@@ -492,6 +499,17 @@ export function mapCompaction(
   const summary = eventType === 'compaction/summary'
     ? summariseText(JSON.stringify(readRecord(event.data)?.['summary'] ?? ''), config)
     : undefined
+  if (eventType === 'compaction/start' && compactionId !== undefined) state.openCompaction(compactionId, event.time)
+  // How long the compaction lock was held. `compaction/end` is the only event
+  // that closes one, and a resumed log can carry an end whose start this
+  // process never saw.
+  const started = eventType === 'compaction/end' && compactionId !== undefined
+    ? state.closeCompaction(compactionId)
+    : undefined
+  // The summarize call's own route, reported by the backend that made it: the
+  // model that wrote a replacement for history is not always the session's.
+  const provider = eventType === 'compaction/summary' ? readString(event.data, 'provider') : undefined
+  const model = eventType === 'compaction/summary' ? readString(event.data, 'model') : undefined
   // `compaction/prune` carries no compaction id — it is a standalone shadow
   // price, identified by the surface range it replaced.
   const correlationUid = compactionId !== undefined
@@ -507,6 +525,8 @@ export function mapCompaction(
     ...error === undefined ? {} : { statusDetail: error },
     message: eventType,
     ...correlationUid === undefined ? {} : { correlationUid },
+    ...started === undefined ? {} : { startTime: started, duration: Math.max(0, event.time - started) },
+    ...provider === undefined || model === undefined ? {} : { aiModel: { name: model, ai_provider: provider } },
     api: { operation: eventType },
     attributes: {
       ...compactionId === undefined ? {} : { compaction_id: compactionId },

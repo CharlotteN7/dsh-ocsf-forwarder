@@ -38,6 +38,14 @@ export interface PendingCall {
   readonly delegationProvider?: string
 }
 
+/** One slash command awaiting the event that settles it. */
+export interface PendingCommand {
+  readonly id: string
+  /** The command name, which only the `command/run` payload carries. */
+  readonly name: string
+  readonly time: number
+}
+
 /** One approval question awaiting its decision. */
 export interface PendingApproval {
   readonly id: string
@@ -75,6 +83,8 @@ export class SessionState {
 
   private readonly calls = new Map<string, PendingCall>()
   private readonly approvals = new Map<string, PendingApproval>()
+  private readonly commands = new Map<string, PendingCommand>()
+  private readonly compactions = new Map<string, number>()
   private readonly turns = new Map<number, number>()
   private readonly steps = new Map<string, number>()
 
@@ -114,6 +124,45 @@ export class SessionState {
     const approval = this.approvals.get(id)
     this.approvals.delete(id)
     return approval
+  }
+
+  /**
+   * Record one slash command so its settlement can be paired.
+   * @param command - the command's identity, name, and start time.
+   */
+  openCommand(command: PendingCommand): void {
+    this.commands.set(command.id, command)
+  }
+
+  /**
+   * Take the command one settlement closes.
+   * @param id - the settlement's command id.
+   * @returns the pending command, or `undefined` when the start was not seen.
+   */
+  closeCommand(id: string): PendingCommand | undefined {
+    const command = this.commands.get(id)
+    this.commands.delete(id)
+    return command
+  }
+
+  /**
+   * Open a compaction bracket.
+   * @param compactionId - the compaction's id.
+   * @param time - the `compaction/start` append time.
+   */
+  openCompaction(compactionId: string, time: number): void {
+    this.compactions.set(compactionId, time)
+  }
+
+  /**
+   * Close a compaction bracket.
+   * @param compactionId - the compaction's id.
+   * @returns the start time, or `undefined` when the start was not seen.
+   */
+  closeCompaction(compactionId: string): number | undefined {
+    const time = this.compactions.get(compactionId)
+    this.compactions.delete(compactionId)
+    return time
   }
 
   /**

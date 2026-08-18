@@ -221,6 +221,41 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
     expect(mapping?.attributes?.['summary_digest']).toBeDefined()
   })
 
+  it('names the model that wrote a summary, which the compaction backend chose', () => {
+    const named = mapEvent(SESSION, event('compaction/summary', {
+      compactionId: 'c1', summary: [], provider: 'deepseek', model: 'deepseek-chat-lite',
+    }), new SessionState(), config)
+    expect(named?.aiModel).toEqual({ name: 'deepseek-chat-lite', ai_provider: 'deepseek' })
+
+    // A summary that named only half the route claims neither: an `ai_model`
+    // missing `name` or `ai_provider` is one the object's schema rejects.
+    const half = mapEvent(SESSION, event('compaction/summary', {
+      compactionId: 'c1', summary: [], provider: 'deepseek',
+    }), new SessionState(), config)
+    expect(half?.aiModel).toBeUndefined()
+
+    // Only the summarizing event reports a model; the lock events have none.
+    expect(mapEvent(SESSION, event('compaction/start', { compactionId: 'c1', model: 'x', provider: 'y' }), new SessionState(), config)?.aiModel)
+      .toBeUndefined()
+  })
+
+  it('times how long a compaction held the lock, and reports none when it never saw the start', () => {
+    const state = new SessionState()
+    mapEvent(SESSION, event('compaction/start', { compactionId: 'c1', turn: 1 }, 2_000), state, config)
+    const end = mapEvent(SESSION, event('compaction/end', { compactionId: 'c1', turn: 1 }, 2_900), state, config)
+    expect(end?.startTime).toBe(2_000)
+    expect(end?.duration).toBe(900)
+
+    // A second end for the same id has nothing left to close.
+    expect(mapEvent(SESSION, event('compaction/end', { compactionId: 'c1' }, 3_000), state, config)?.duration).toBeUndefined()
+    // A resumed log can carry an end whose start this process never observed.
+    expect(mapEvent(SESSION, event('compaction/end', { compactionId: 'other' }, 3_000), new SessionState(), config)?.duration)
+      .toBeUndefined()
+    // `compaction/prune` carries no id and opens nothing.
+    expect(mapEvent(SESSION, event('compaction/prune', { shadowedRange: { start: 1, end: 2 } }, 4_000), state, config)?.duration)
+      .toBeUndefined()
+  })
+
   it('reports a failed compaction', () => {
     const mapping = mapEvent(SESSION, event('compaction/end', { compactionId: 'c1', turn: 1, error: 'model refused' }), new SessionState(), config)
     expect(mapping?.statusId).toBe(STATUS.failure)

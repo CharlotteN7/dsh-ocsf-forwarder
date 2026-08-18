@@ -398,6 +398,26 @@ function emitted(): readonly OcsfRecord[] {
     { type: 'tool/result', seq: 27, time: 1_027, data: { message: { source: { callId: 'c6' } } } },
     { type: 'tool/call', seq: 28, time: 1_028, data: { turn: 1, step: 0, callId: 'c7', name: 'subagent_claude_code', arguments: '{"prompt":"go"}' } },
     { type: 'tool/result', seq: 29, time: 1_029, data: { message: { source: { callId: 'c7' } } } },
+    { type: 'agent-preset/selected', seq: 30, time: 1_030, data: { agentPreset: 'reviewer' } },
+    { type: 'command/run', seq: 31, time: 1_031, data: { commandId: 'k1', name: 'deploy', args: '--now', source: 'user' } },
+    { type: 'command/done', seq: 32, time: 1_032, data: { commandId: 'k1', kind: 'success' } },
+    { type: 'goal/change', seq: 33, time: 1_033, data: { operation: 'create', goal: { id: 'g1', revision: 1, objective: 'x', phase: 'active' } } },
+    { type: 'plan/mode', seq: 34, time: 1_034, data: { active: true } },
+    {
+      type: 'llm/retry',
+      seq: 35,
+      time: 1_035,
+      data: { retryId: 'r1', turn: 1, step: 0, provider: 'deepseek', mode: 'normal', policyKey: 'k', retry: 1, delayMs: 5, failure: { code: 'EAGAIN', message: 'x' } },
+    },
+    { type: 'llm/retry-started', seq: 36, time: 1_036, data: { retryId: 'r1', turn: 1, step: 0, retry: 1 } },
+    {
+      type: 'web/deepseek-search-llm-request',
+      seq: 37,
+      time: 1_037,
+      data: { apiVersion: '2024-10-01', body: { model: 'deepseek-search-1', max_tokens: 8, messages: [] } },
+    },
+    { type: 'compaction/start', seq: 38, time: 1_038, data: { compactionId: 'k9', turn: 1 } },
+    { type: 'compaction/end', seq: 39, time: 1_039, data: { compactionId: 'k9', turn: 1 } },
   ]
   const session: ForwardableSession = { id: 'S1', firstLiveSeq: 0, seq: events.length, events, header: { cwd: '/srv' } }
   const forwarder = new Forwarder(testEnvironment(config), config, sink, undefined, error => { throw error })
