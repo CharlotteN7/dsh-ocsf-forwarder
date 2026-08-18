@@ -26,7 +26,8 @@ export interface OcsfProduct {
 /** One entry of `metadata.extensions` — a schema extension the record uses. */
 export interface OcsfExtension {
   readonly name: string
-  readonly uid: number
+  /** OCSF types this `string_t`; `uid_numeric` is the numeric slot, and is not emitted. */
+  readonly uid: string
   readonly version: string
 }
 

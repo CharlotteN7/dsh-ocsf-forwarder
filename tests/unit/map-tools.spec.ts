@@ -529,11 +529,11 @@ describe('the composed record', () => {
     }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), testConfig())!)
     expect(plain.metadata.extensions).toBeUndefined()
 
-    const config = testConfig({ extension: { uid: 4242 } })
+    const config = testConfig({ extension: { uid: '4242' } })
     const registered = buildRecord(testEnvironment(config), {
       sessionId: SESSION, seq: 1, time: 1, eventType: 'tool/call', replayed: false,
     }, mapEvent(SESSION, call('bash', { command: 'id' }), new SessionState(), config)!)
-    expect(registered.metadata.extensions).toEqual([{ name: 'dsh', uid: 4242, version: '0.1.0-test' }])
+    expect(registered.metadata.extensions).toEqual([{ name: 'dsh', uid: '4242', version: '0.1.0-test' }])
   })
 
   it('places the extension object at the top level when the deployment asks', () => {

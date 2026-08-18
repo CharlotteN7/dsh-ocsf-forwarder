@@ -209,8 +209,12 @@ export interface Config {
      * OCSF extension uid, as assigned by the OCSF extension registry. There is
      * no default: `metadata.extensions` is omitted until a deployment has an
      * assigned uid, because every unassigned value collides with somebody.
+     *
+     * OCSF types `extension.uid` as `string_t` — `uid_numeric` is the numeric
+     * slot — so `"999"` is the registry's own rendering and `999` is a record
+     * that fails validation wherever it lands.
      */
-    uid?: number
+    uid?: string
     placement?: ExtensionPlacement
   }
   /** Vendor name written into `metadata.product`. */
@@ -330,7 +334,7 @@ export const Config: z<Config> = z.object({
   toolClasses: z.dict(z.union(CONFIGURABLE_TOOL_CLASSES)).default({}),
   extension: z.object({
     name: z.string().default('dsh'),
-    uid: z.number(),
+    uid: z.string(),
     // Every OCSF class is `additionalProperties: false`, so a top-level
     // extension key makes the record fail validation. `unmapped` is the slot
     // the schema provides for exactly this.
@@ -391,7 +395,7 @@ export interface ResolvedConfig {
   readonly delegationTools: Readonly<Record<string, string>>
   readonly extensionName: string
   /** Absent until a deployment configures a uid the OCSF registry assigned it. */
-  readonly extensionUid: number | undefined
+  readonly extensionUid: string | undefined
   readonly extensionPlacement: ExtensionPlacement
   readonly vendorName: string
 }
@@ -435,6 +439,17 @@ function assertPositive(name: string, value: number): number {
 /** Validate one count of records or files, which a fraction cannot express. */
 function assertPositiveInteger(name: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`ocsf-forwarder: ${name} must be a positive integer`)
+  return value
+}
+
+/**
+ * Validate one identifier that is only useful when it says something.
+ * @param name - the configuration key, named in the failure message.
+ * @param value - the configured value.
+ * @returns the value, once it is usable.
+ */
+function assertNonEmpty(name: string, value: string): string {
+  if (value.trim().length === 0) throw new Error(`ocsf-forwarder: ${name} must not be empty`)
   return value
 }
 
@@ -758,7 +773,7 @@ export function resolveConfig(
     extensionName: config.extension?.name ?? 'dsh',
     extensionUid: config.extension?.uid === undefined
       ? undefined
-      : assertPositiveInteger('extension.uid', config.extension.uid),
+      : assertNonEmpty('extension.uid', config.extension.uid),
     extensionPlacement: config.extension?.placement ?? 'unmapped',
     vendorName: config.vendorName ?? DEFAULT_VENDOR_NAME,
   }

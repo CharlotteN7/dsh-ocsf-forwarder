@@ -149,7 +149,7 @@ describe('resolution', () => {
 
   it('claims no OCSF extension uid until a deployment supplies a registered one', () => {
     expect(resolveConfig(minimal).extensionUid).toBeUndefined()
-    expect(resolveConfig({ ...minimal, extension: { uid: 4242 } }).extensionUid).toBe(4242)
+    expect(resolveConfig({ ...minimal, extension: { uid: '4242' } }).extensionUid).toBe('4242')
   })
 
   it('names a vendor rather than whatever directory the plugin was built in', () => {
@@ -361,8 +361,8 @@ describe('numeric bounds', () => {
   })
 
   it('refuses an extension uid the registry could not have assigned', () => {
-    expect(() => resolveConfig({ ...minimal, extension: { uid: 0 } }))
-      .toThrow(/extension\.uid must be a positive integer/)
+    expect(() => resolveConfig({ ...minimal, extension: { uid: '   ' } }))
+      .toThrow(/extension\.uid must not be empty/)
   })
 })
 
