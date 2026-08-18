@@ -292,6 +292,11 @@ beside the spool. A hostname is not an identity: it changes when a laptop is ren
 across a fleet imaged from one template. The uid also keys the heartbeat's `metadata.uid`, which is
 what lets a SIEM detect a *missing* heartbeat rather than only a malformed one.
 
+> **Superseded in part by [§27](#27-the-install-uid-lives-under-the-harness-home-not-beside-the-spool).**
+> "Persisted beside the spool" is what §27 exists to overturn: one host with two spools minted two
+> uids and its two OCSF producers disagreed about which device they described. The default is
+> `$DSH_HOME/install-uid`. Everything else in this section stands.
+
 `metadata.original_time` is the session log's own rendering of the append time, passed through as a
 string. OCSF is explicit that it is "a pass-through string in its native format… not normalized" —
 the normalised value is the base event's `time` — so reformatting it as ISO 8601 would be the one
@@ -597,11 +602,14 @@ it, so the top level is the floor a newly added file must clear and the per-file
 each existing file above it.
 
 Closing the gap came first, and the entries record the result rather than excusing it: branches
-went from 88.36% to 97.94% overall and lines to 100%, with thirteen of twenty-one files now at 100
-on all four metrics. `src/map/lifecycle.ts` went from 75.93% to 98.39% branch, `src/sink/otlp.ts`
-from 50% to 100%. No `v8 ignore` was added anywhere. What remains is the absent half of a few
-`field === undefined ? {} : { field }` spreads and of two `error instanceof Error` renderings,
-reachable only from inputs no boundary this plugin has produces.
+went from 88.36% to 97.94% overall and lines to 100%. `src/map/lifecycle.ts` went from 75.93% to
+98.39% branch, `src/sink/otlp.ts` from 50% to 100%. No `v8 ignore` was added anywhere. What remains
+is the absent half of a few `field === undefined ? {} : { field }` spreads and of two
+`error instanceof Error` renderings, reachable only from inputs no boundary this plugin has
+produces.
+
+The per-file count moves with the file count, so it is stated in one place — the header comment of
+`vitest.config.ts`, which the gate is read from — rather than repeated here where it goes stale.
 
 Removing the tests that closed `lifecycle.ts` demonstrates the difference: the per-file gate fails
 with `branches (87.7%) does not meet "src/map/lifecycle.ts" threshold (98.39%)`, while the
@@ -695,3 +703,155 @@ tool that exits zero on a file with nothing in it reports the absence of evidenc
 **`OcsfMetadata.uid` became required.** It was optional and always set. `prev_event.uid` is the
 predecessor's `metadata.uid` and the schema requires it, so the alternative was a `?? ''` on a
 security path — a link to nothing, emitted as a valid-looking string.
+
+## 36. A process without a pid is identified, not invented
+
+Every Process Activity record failed OCSF validation. The `process` object constrains
+`at_least_one: [pid, uid, cpid]` and we emitted `{ name, cmd_line }` — so every `bash`, `run_code`,
+`terminal_*`, `hook/*` and delegation record was invalid, which is most of what a SOC reads this
+plugin for.
+
+The session log never names the child's operating-system pid. `tool/call` carries the tool name and
+the model's arguments; `hook/invoked` carries the hook point and the handler id. Neither the harness
+nor this plugin ever sees the process the harness launched.
+
+Two ways out were rejected. **Synthesising a pid** — the agent's own `process.pid`, a counter, a
+hash of the call id — puts a number in the slot a SOC reads as an operating-system identifier, where
+it would join to the wrong process on any host that also ships EDR telemetry. A fabricated process
+identifier in a SOC record is worse than an absent object. **Omitting `process`** is not available
+either: class 1007 lists it as a required attribute, so a record without it is invalid for a second
+reason, and moving the information to `actor.process` would describe the harness rather than the
+subprocess — `actor.process` already carries the harness's pid and says so.
+
+`process.uid` is the slot OCSF defines for this: "a unique identifier for this process assigned by
+the producer (tool). Facilitates correlation of a process event with other events for that process."
+It is set to the correlation uid — `<session>:<callId>` for a tool call, `<session>:hook:<handlerId>`
+for a hook — so the launch record and the record of that same process settling carry one identifier,
+which is exactly what the attribute is for, and no number claims to be a pid.
+
+`exit_code` moved with it. It is not one of the `process` object's 35 attributes; class 1007 defines
+it at the top level of the record, and that is where it is emitted.
+
+## 37. Conformance is checked one level down, because that is where the schema kept being broken
+
+§30 narrowed the top-level check to each class's own definition. The test was still named "adds no
+top-level attribute its own class does not define", and it meant it: it walked `Object.keys(record)`
+and stopped. `device.bogus_nested_attr` on every record passed it.
+
+Three real violations were behind that. `process.exit_code`, an attribute the `process` object does
+not define. `metadata.extensions[].uid` emitted as a number where OCSF types it `string_t`.
+`message_context` carrying neither of `at_least_one: [application, service]`. None was reachable by
+any test in the suite, and one of them — the extension uid — is invisible until a deployment
+configures the key, at which point every record it emits becomes invalid at the SIEM with nothing
+local to say so. The conformance run now configures one, so the slot is exercised.
+
+The nested table is narrowed per object exactly as §30 narrows per class, and for the same reason:
+transcribing all 35 attributes of `process` or all ~60 of `device` produces a set large enough to
+stop discriminating. Constraints are checked too, because `at_least_one` is what the `process`
+defect violated and an attribute-only check would have passed it.
+
+## 38. `extension.uid` is a string, and that is a configuration break
+
+OCSF types `extension.uid` as `string_t`; `uid_numeric` is the numeric slot and its own note says a
+producer may fill it "only in addition to `uid` and not as an alternative to it". The configuration
+validated a positive integer and emitted one.
+
+`extension: { uid: 999 }` no longer loads. That is deliberate. The alternative — accepting a number
+and rendering it as a string — silently reinterprets a deployment's configuration, and the registry
+assigns the value as a string anyway, so the new form is the one an operator already has written
+down. `docs/configuration.md`'s "the ones that count records or files — `spoolMaxGenerations`,
+`<shipper>.batchSize`, `extension.uid` — must be whole numbers" was the bug in prose form.
+
+## 39. Nine event types got mappers; four rows got the truth instead
+
+Thirteen of the forty-four rows in `docs/mapping.md` named a class and an activity for an event type
+with no `case` in the dispatcher. All thirteen took the generic fallback: API Activity 6003 /
+activity `99 Other`, the event type, and nothing else from the payload.
+
+Nine now have mappers, chosen because the fallback dropped a fact a SOC reads the event for: a slash
+command's name and arguments, a retry's provider failure code, an inbox splice's insert count, the
+agent preset that changed the session's composition, the goal, the plan mode, the model that served
+an auxiliary search request.
+
+Four did not, because they are dropped by default and produce no record: `feedback/record`,
+`session/title`, `session/title-llm-request` and `todo/write`. Their payloads are the reason they are
+dropped — a human remark, a model-written restatement of the prompt, the prompt itself, user and
+model task text. Writing a mapper for a path stock deployments never take, and paying its per-file
+coverage in tests of a lane the documentation tells people not to open, buys a row in a table. The
+rows say what re-enabling them actually produces instead, and the fallback is described once below
+the table rather than reproduced in each row.
+
+The table is now read by a test. It must match the harness's `KNOWN_SESSION_EVENT_TYPES` exactly,
+once each and in order — the 44-row scope claim, held as an assertion — and every row naming a class
+must name what the mapper emits. Against the 0.5.1 dispatcher it names all thirteen wrong rows and
+nothing else.
+
+## 40. The published verifier was wrong about our own records
+
+`docs/integrity.md` shipped a Python verifier for third parties with a caveat: `json.dumps` matches
+RFC 8785 "for these records: every number in them is an integer, and every object key is ASCII".
+Both halves are false, and the failure mode is the worst one an audit tool has — a clean spool
+reported as tampered.
+
+A `hook/result` whose `durationMs` is sub-millisecond emits `"duration":1e-7`; Python renders the
+same double `1e-07`. One character, and the snippet exits `altered` on a file `dsh-ocsf-verify`
+calls INTACT. A model names its own tool arguments, and one holding an unpaired surrogate reaches
+`unmapped.dsh.arguments[].key`, where `ensure_ascii=False` emits the raw code point and the
+following `.encode("utf-8")` raises `UnicodeEncodeError`. And `extension.name` is a deployment
+string that becomes an object key, so key order by code point rather than by UTF-16 code unit is
+reachable too.
+
+Restricting the example was considered and rejected: a third party's alternative to this snippet is
+running our binary, which is the thing the snippet exists to avoid needing. It now implements
+ECMAScript `Number::toString`, ECMAScript string escaping, and UTF-16 key order — about forty lines
+— and says why `json.dumps` is not a substitute. Its number rendering was checked against
+`JSON.stringify` over 12000 doubles including every boundary of the `Number::toString` exponent
+rules. The two renderings it hinges on are pinned in the unit suite, so the page cannot quietly stop
+describing what the spool contains.
+
+## 41. What the SOC lane carries verbatim, stated completely
+
+`docs/operations.md` listed the exceptions to the redaction rule and the list was short by five.
+Model-chosen argument **names**, a `tool/result` error's `name` and `code`, `compaction/end.error`,
+and `hook/invoked.matcher` all reached the SOC lane verbatim and were in no list.
+
+`compaction/end.error` is now digested. It is a rendered failure — a model refusal, or an
+exception's message — which is the same category as `turn/end`'s provider failure message, and that
+one was already digested. Copying it into `status_detail` was an inconsistency, not a decision.
+
+The other four are documented as deliberate, because a digest of each destroys what it is for. A
+digest of the argument name `file_path` groups nothing and tells no one which argument a value
+belonged to. An error's class name is chosen by the tool implementation, not composed per call. A
+hook `matcher` is deployment-authored configuration, which is a different trust rank from the `grep`
+pattern it resembles — that one is model-composed. Each is now a sentinel in the SOC-lane invariant
+and appears in that test's list of expected exceptions, so widening the lane means editing a list
+somebody has to justify.
+
+The "bounded enumeration" claim was the weakest thing on the page. Only `hook/result.decision` is
+reduced to a fixed set. `TurnEndReasonMap`, `ApprovalOutcome` and the sandbox modes are
+merge-extensible: an out-of-repo plugin controls those values and they reach `status_detail`
+verbatim. The page says so now rather than implying an enforcement that does not exist.
+
+## 42. The counter line names the sink's drops, because `forwarded` never could
+
+`docs/operations.md` said the periodic `forwarded=… dropped=… unreadable=… failed=…` line says
+whether an outage is delaying records or consuming them. It cannot. `forwarded` counts records
+handed to the sink; a spool that lost its descriptor accepts every record and drops it, and a dead
+sink therefore reported `{forwarded: 3, dropped: 0, failed: 0}` — the same line a healthy one writes.
+`dropped` is the drop *policy*, and `failed` is a contained exception in the listener; neither has
+ever said anything about the spool.
+
+The line now carries `sink_dropped` and `sink_failed` from the same `pressure()` call the heartbeat
+already used, so the claim is true rather than the sentence being softened. The heartbeat's
+`sink_failed` / `sink_dropped_records` at `severity_id: 5` remain the off-host signal, and the doc
+now says which counter answers which question.
+
+## 43. An OTLP query string survives the default path
+
+`https://collector.test/?tenant=7` resolved to `https://collector.test/v1/logs`. The default path was
+applied by constructing a URL from the path alone, which drops the query with it — and a collector
+routing on `?tenant=7` then received every batch on its default tenant, with nothing anywhere saying
+so. The two branches also disagreed: an endpoint that already named a path kept its query.
+
+The query is preserved in both branches now. This is a silent-misdelivery fix, not a validation one:
+there was no value to reject, only a value to stop discarding.
