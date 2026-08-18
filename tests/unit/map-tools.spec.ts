@@ -84,6 +84,7 @@ describe('tool/call mapping', () => {
     expect(mapping?.statusId).toBe(STATUS.unknown)
     expect(mapping?.correlationUid).toBe(`${SESSION}:call-1`)
     expect(mapping?.process?.name).toBe('ls')
+    expect(mapping?.process?.uid).toBe(`${SESSION}:call-1`)
   })
 
   it('maps a read call onto File System Activity and keeps the path', () => {
@@ -268,7 +269,9 @@ describe('tool/result correlation', () => {
     const config = testConfig()
     const state = new SessionState()
     mapEvent(SESSION, call('bash', { command: 'ls -la /etc' }), state, config)
-    expect(mapEvent(SESSION, result('call-1', false), state, config)?.process?.name).toBe('ls')
+    const settled = mapEvent(SESSION, result('call-1', false), state, config)
+    expect(settled?.process?.name).toBe('ls')
+    expect(settled?.process?.uid).toBe(`${SESSION}:call-1`)
 
     mapEvent(SESSION, call('read', { file_path: '/srv/app/.env' }), state, config)
     expect(mapEvent(SESSION, result('call-1', false), state, config)?.file?.path).toBe('/srv/app/.env')
@@ -287,6 +290,25 @@ describe('tool/result correlation', () => {
     }, new SessionState(), config)
     expect(mapping?.classUid).toBe(CLASS.fileSystemActivity)
     expect(mapping?.file?.name).toBe('write')
+  })
+
+  it('identifies a launched process the harness never reported an OS pid for', () => {
+    const config = testConfig()
+    const state = new SessionState()
+    // `process` constrains `at_least_one: [pid, uid, cpid]`. No payload names
+    // the child's pid, so every record about one subprocess carries the same
+    // producer-assigned `uid`, and none carries an invented pid.
+    const launch = mapEvent(SESSION, call('bash', { command: 'ls' }), state, config)
+    expect(launch?.process?.pid).toBeUndefined()
+    expect(launch?.process?.uid).toBe(`${SESSION}:call-1`)
+
+    const unpaired = mapEvent(SESSION, result('never-seen', false), new SessionState(), config)
+    expect(unpaired?.process).toBeUndefined()
+
+    const delegation = mapEvent(SESSION, call('subagent_codex', { prompt: 'go' }), state, testConfig({
+      delegationTools: { subagent_codex: 'codex' },
+    }))
+    expect(delegation?.process?.uid).toBe(`${SESSION}:call-1`)
   })
 
   it('does not let two sessions share a call id', () => {
@@ -461,7 +483,7 @@ describe('unresolved calls', () => {
   it('flushes a call that never settled with an unknown status', () => {
     const mapping = mapUnresolvedCall(SESSION, {
       callId: 'call-9', name: 'bash', toolClass: 'process-launch', time: 10, seq: 3, turn: 1, step: 0,
-      process: { name: 'sleep' },
+      process: { name: 'sleep', uid: `${SESSION}:call-9` },
     }, 60)
     expect(mapping.statusId).toBe(STATUS.unknown)
     expect(mapping.duration).toBe(50)

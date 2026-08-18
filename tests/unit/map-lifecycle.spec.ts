@@ -139,7 +139,8 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
     expect(result?.activityId).toBe(ACTIVITY.process.terminate)
     expect(result?.statusId).toBe(STATUS.failure)
     expect(result?.duration).toBe(40)
-    expect(result?.process?.exit_code).toBe(2)
+    expect(result?.exitCode).toBe(2)
+    expect(result?.process?.uid).toBe(`${SESSION}:hook:h1`)
   })
 
   it('reduces a hook decision to the protocol vocabulary', () => {
@@ -318,7 +319,7 @@ describe('optional attributes', () => {
     expect(attributes('hook/invoked', { point: 'PreToolUse', handlerId: 'h1', matcher: 'Bash' })['matcher']).toBe('Bash')
 
     const bare = mapEvent(SESSION, event('hook/result', { point: 'PreToolUse', handlerId: 'h1', decision: 'allow' }), new SessionState(), config)
-    expect(bare?.process?.exit_code).toBeUndefined()
+    expect(bare?.exitCode).toBeUndefined()
     expect(bare?.duration).toBeUndefined()
 
     const timed = mapEvent(
@@ -327,7 +328,7 @@ describe('optional attributes', () => {
       new SessionState(),
       config,
     )
-    expect(timed?.process?.exit_code).toBe(0)
+    expect(timed?.exitCode).toBe(0)
     expect(timed?.duration).toBe(12)
   })
 

@@ -51,7 +51,7 @@ const BASE_EVENT_ATTRIBUTES: readonly string[] = [
 const CLASS_ATTRIBUTES: Readonly<Record<number, readonly string[]>> = Object.freeze({
   [CLASS.fileSystemActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'file', 'message_context'],
   [CLASS.scheduledJobActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'job', 'message_context'],
-  [CLASS.processActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'message_context', 'process'],
+  [CLASS.processActivity]: ['actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'exit_code', 'message_context', 'process'],
   [CLASS.authorizeSession]: [
     'actor', 'ai_agent', 'ai_model', 'api', 'attestation_list', 'delegation', 'device', 'http_request',
     'message_context', 'privileges', 'src_endpoint', 'user',
@@ -70,72 +70,286 @@ const CLASS_ATTRIBUTES: Readonly<Record<number, readonly string[]>> = Object.fre
   ],
 })
 
+/** One attribute of an OCSF object, as the object defines it. */
+interface ObjectAttribute {
+  /** The JSON type the OCSF type resolves to; `array` covers every `is_array` attribute. */
+  readonly type: 'string' | 'number' | 'boolean' | 'object' | 'array'
+  readonly required?: true
+  /** The OCSF object this attribute — or, for an array, each of its members — carries. */
+  readonly object?: string
+}
+
+/** One OCSF object definition. */
+interface ObjectDefinition {
+  readonly attributes: Readonly<Record<string, ObjectAttribute>>
+  /** The object's own `at_least_one` constraint, when it has one. */
+  readonly atLeastOne?: readonly string[]
+}
+
 /**
- * The objects the `record_integrity` profile brings, each attribute mapped to
- * the JSON type its OCSF type resolves to, and marked when the object requires
- * it. Read from `schema.ocsf.io/api/1.9.0/objects/<name>`; `attestation_list`
- * itself is `is_array` on every class that defines it.
+ * Every OCSF object this plugin emits, read from
+ * `schema.ocsf.io/api/1.9.0/objects/<name>`, with each attribute's JSON type,
+ * whether the object requires it, and the object it nests.
  *
- * An OCSF object is closed exactly as a class is, so this is the same check as
- * the per-class one above, applied one level down: emitting `chain_id` instead
- * of `chain_uid`, or a hex string where an integer id belongs, would produce
- * records that validate nowhere and that no consumer could join on.
+ * An OCSF object is closed exactly as a class is, so this is the per-class
+ * check of §30 applied all the way down. Walking only `Object.keys(record)`
+ * left every nested object unchecked: `device.bogus_nested_attr` passed, and
+ * `process.exit_code` — which the `process` object does not define, and which
+ * class 1007 defines at the top level — shipped through it.
+ *
+ * Each object is narrowed to the attributes this plugin can emit, for the
+ * reason §30 gives: transcribing all ~35 of `process` or all ~60 of `device`
+ * produces a set large enough to stop discriminating. Emitting an attribute an
+ * object does define but this plugin has not emitted before fails until the
+ * entry is added, and adding it is how that change gets made deliberately.
  */
-const PROFILE_OBJECTS: Readonly<Record<string, Readonly<Record<string, { type: string; required?: true }>>>> = Object.freeze({
+const OBJECTS: Readonly<Record<string, ObjectDefinition>> = Object.freeze({
+  metadata: {
+    attributes: {
+      product: { type: 'object', required: true, object: 'product' },
+      version: { type: 'string', required: true },
+      profiles: { type: 'array' },
+      extensions: { type: 'array', object: 'extension' },
+      log_provider: { type: 'string' },
+      log_name: { type: 'string' },
+      uid: { type: 'string' },
+      correlation_uid: { type: 'string' },
+      sequence: { type: 'number' },
+      logged_time: { type: 'number' },
+      original_time: { type: 'string' },
+      tenant_uid: { type: 'string' },
+      labels: { type: 'array' },
+      tags: { type: 'array', object: 'key_value_object' },
+    },
+  },
+  product: {
+    attributes: { name: { type: 'string' }, vendor_name: { type: 'string' }, version: { type: 'string' } },
+    atLeastOne: ['name', 'uid'],
+  },
+  extension: {
+    // `uid` is `string_t`; `uid_numeric` is the numeric slot, and a number here
+    // invalidates every record the deployment emits.
+    attributes: { name: { type: 'string' }, uid: { type: 'string' }, version: { type: 'string', required: true } },
+    atLeastOne: ['name', 'uid'],
+  },
+  key_value_object: {
+    attributes: { name: { type: 'string', required: true }, value: { type: 'string' } },
+    atLeastOne: ['value', 'values'],
+  },
+  application: {
+    attributes: { name: { type: 'string' }, uid: { type: 'string' } },
+    atLeastOne: ['uid', 'name'],
+  },
+  cloud: { attributes: { provider: { type: 'string', required: true } } },
+  network_endpoint: {
+    attributes: { hostname: { type: 'string' }, svc_name: { type: 'string' } },
+    atLeastOne: ['ip', 'uid', 'name', 'hostname', 'svc_name', 'instance_uid', 'interface_uid', 'interface_name', 'domain'],
+  },
+  ai_agent: {
+    attributes: {
+      name: { type: 'string' },
+      type_id: { type: 'number' },
+      version: { type: 'string' },
+      instance_uid: { type: 'string' },
+      uid: { type: 'string' },
+      ai_model: { type: 'object', object: 'ai_model' },
+    },
+    atLeastOne: ['name', 'uid'],
+  },
+  ai_model: {
+    attributes: { name: { type: 'string', required: true }, ai_provider: { type: 'string', required: true } },
+    atLeastOne: ['name', 'uid'],
+  },
+  message_context: {
+    attributes: {
+      ai_role_id: { type: 'number' },
+      application: { type: 'object', object: 'application' },
+      prompt_tokens: { type: 'number' },
+      completion_tokens: { type: 'number' },
+      total_tokens: { type: 'number' },
+    },
+    atLeastOne: ['application', 'service'],
+  },
+  delegation: {
+    attributes: {
+      uid: { type: 'string', required: true },
+      parent_uid: { type: 'string' },
+      created_time: { type: 'number' },
+    },
+  },
+  actor: {
+    attributes: { process: { type: 'object', object: 'process' }, user: { type: 'object', object: 'user' } },
+    atLeastOne: ['process', 'user', 'iam_role', 'invoked_by', 'session', 'application', 'app_name', 'app_uid'],
+  },
+  device: {
+    attributes: {
+      type_id: { type: 'number', required: true },
+      hostname: { type: 'string' },
+      uid: { type: 'string' },
+      os: { type: 'object', object: 'os' },
+    },
+    atLeastOne: ['ip', 'uid', 'name', 'hostname', 'instance_uid', 'interface_uid', 'interface_name'],
+  },
+  os: {
+    attributes: { name: { type: 'string', required: true }, type_id: { type: 'number', required: true } },
+  },
+  user: {
+    attributes: { name: { type: 'string' }, type_id: { type: 'number' } },
+    atLeastOne: ['account', 'name', 'uid'],
+  },
+  process: {
+    // The object has 35 attributes and `exit_code` is not among them.
+    attributes: {
+      name: { type: 'string' },
+      pid: { type: 'number' },
+      cmd_line: { type: 'string' },
+      uid: { type: 'string' },
+    },
+    atLeastOne: ['pid', 'uid', 'cpid'],
+  },
+  file: {
+    attributes: {
+      name: { type: 'string', required: true },
+      path: { type: 'string' },
+      type_id: { type: 'number', required: true },
+    },
+  },
+  api: {
+    attributes: {
+      operation: { type: 'string', required: true },
+      service: { type: 'object', object: 'service' },
+      version: { type: 'string' },
+    },
+  },
+  service: { attributes: { name: { type: 'string' } }, atLeastOne: ['name', 'uid'] },
+  http_request: {
+    attributes: { http_method: { type: 'string' }, url: { type: 'object', object: 'url' } },
+  },
+  url: {
+    attributes: { url_string: { type: 'string' }, hostname: { type: 'string' } },
+    atLeastOne: ['url_string', 'path'],
+  },
+  job: {
+    attributes: { name: { type: 'string' }, uid: { type: 'string' } },
+    atLeastOne: ['name', 'type_id'],
+  },
+  observable: {
+    attributes: {
+      name: { type: 'string' },
+      type_id: { type: 'number', required: true },
+      value: { type: 'string' },
+    },
+  },
   attestation: {
-    uid: { type: 'string' },
-    chain_uid: { type: 'string' },
-    authority_uid: { type: 'string' },
-    prev_event: { type: 'object' },
-    fingerprint: { type: 'object' },
-    signatures: { type: 'object' },
+    attributes: {
+      uid: { type: 'string' },
+      chain_uid: { type: 'string' },
+      prev_event: { type: 'object', object: 'prev_event' },
+      fingerprint: { type: 'object', object: 'fingerprint' },
+    },
+    atLeastOne: ['fingerprint', 'signatures'],
   },
   prev_event: {
-    uid: { type: 'string', required: true },
-    type_uid: { type: 'number' },
-    fingerprint: { type: 'object' },
+    attributes: {
+      uid: { type: 'string', required: true },
+      type_uid: { type: 'number' },
+      fingerprint: { type: 'object', object: 'fingerprint' },
+    },
   },
   fingerprint: {
-    value: { type: 'string', required: true },
-    algorithm: { type: 'string' },
-    algorithm_id: { type: 'number', required: true },
-    encoding: { type: 'string' },
-    encoding_id: { type: 'number' },
-    serialization: { type: 'string' },
-    serialization_id: { type: 'number' },
+    attributes: {
+      value: { type: 'string', required: true },
+      algorithm_id: { type: 'number', required: true },
+      encoding_id: { type: 'number' },
+    },
   },
-})
-
-/** Which object type each nested attribute of the profile carries. */
-const PROFILE_OBJECT_OF_ATTRIBUTE: Readonly<Record<string, string>> = Object.freeze({
-  prev_event: 'prev_event',
-  fingerprint: 'fingerprint',
 })
 
 /**
- * Check one emitted object against its schema definition, and everything it
+ * The OCSF object each record attribute carries. An attribute absent from this
+ * map holds no object — a scalar, a string list, or `unmapped`, whose whole
+ * point is that the schema does not define what is inside it.
+ */
+const OBJECT_OF_ATTRIBUTE: Readonly<Record<string, string>> = Object.freeze({
+  metadata: 'metadata',
+  application: 'application',
+  cloud: 'cloud',
+  src_endpoint: 'network_endpoint',
+  ai_agent: 'ai_agent',
+  ai_model: 'ai_model',
+  message_context: 'message_context',
+  delegation: 'delegation',
+  actor: 'actor',
+  device: 'device',
+  user: 'user',
+  process: 'process',
+  file: 'file',
+  api: 'api',
+  http_request: 'http_request',
+  job: 'job',
+  observables: 'observable',
+  attestation_list: 'attestation',
+})
+
+/** Whether an emitted member matches the JSON type its OCSF type resolves to. */
+function typeOf(member: unknown): string {
+  return Array.isArray(member) ? 'array' : typeof member
+}
+
+/**
+ * Check one emitted object against its OCSF definition, and everything it
  * nests.
  * @param name - the OCSF object name.
+ * @param path - where the object sits in the record, for the violation message.
  * @param value - the object as emitted.
  * @returns one entry per violation, naming the attribute.
  */
-function objectViolations(name: string, value: Readonly<Record<string, unknown>>): string[] {
-  const definition = PROFILE_OBJECTS[name] as Readonly<Record<string, { type: string; required?: true }>>
+function objectViolations(name: string, path: string, value: Readonly<Record<string, unknown>>): string[] {
+  const definition = OBJECTS[name] as ObjectDefinition
   const violations: string[] = []
-  for (const [key, required] of Object.entries(definition)) {
-    if (required.required === true && value[key] === undefined) violations.push(`${name}.${key}: missing, and required`)
+  for (const [key, attribute] of Object.entries(definition.attributes)) {
+    if (attribute.required === true && value[key] === undefined) violations.push(`${path}.${key}: missing, and required`)
+  }
+  if (definition.atLeastOne !== undefined && !definition.atLeastOne.some(key => value[key] !== undefined)) {
+    violations.push(`${path}: none of at_least_one [${definition.atLeastOne.join(', ')}]`)
   }
   for (const [key, member] of Object.entries(value)) {
-    const attribute = definition[key]
+    const attribute = definition.attributes[key]
     if (attribute === undefined) {
-      violations.push(`${name}.${key}: not defined by the object`)
+      violations.push(`${path}.${key}: not defined by the ${name} object`)
       continue
     }
-    if (typeof member !== attribute.type) violations.push(`${name}.${key}: ${typeof member}, not ${attribute.type}`)
-    const nested = PROFILE_OBJECT_OF_ATTRIBUTE[key]
-    if (nested !== undefined) violations.push(...objectViolations(nested, member as Record<string, unknown>))
+    if (typeOf(member) !== attribute.type) {
+      violations.push(`${path}.${key}: ${typeOf(member)}, not ${attribute.type}`)
+      continue
+    }
+    if (attribute.object === undefined) continue
+    const members = attribute.type === 'array' ? member as unknown[] : [member]
+    members.forEach((entry, index) => {
+      const where = attribute.type === 'array' ? `${path}.${key}[${String(index)}]` : `${path}.${key}`
+      violations.push(...objectViolations(attribute.object as string, where, entry as Record<string, unknown>))
+    })
   }
   return violations
+}
+
+/**
+ * Every violation in one record's nested objects.
+ * @param record - the record as a consumer receives it.
+ * @returns one entry per violation.
+ */
+function nestedViolations(record: OcsfRecord): string[] {
+  const fields = record as unknown as Record<string, unknown>
+  return Object.entries(OBJECT_OF_ATTRIBUTE).flatMap(([attribute, object]) => {
+    const value = fields[attribute]
+    if (value === undefined) return []
+    const members = Array.isArray(value) ? value : [value]
+    return members.flatMap((entry, index) => objectViolations(
+      object,
+      Array.isArray(value) ? `${attribute}[${String(index)}]` : attribute,
+      entry as Record<string, unknown>,
+    ))
+  })
 }
 
 /** One run covering every mapper, driven the way the session store drives one. */
@@ -143,6 +357,10 @@ function emitted(): readonly OcsfRecord[] {
   const config = testConfig({
     delegationTools: { subagent_claude_code: 'claude-code' },
     fleet: { installUid: 'install-test', tenantUid: 'acme', labels: ['prod'], tags: { owner: 'soc' } },
+    // A registered uid is configured so `metadata.extensions` is on every
+    // record here: the list is omitted without one, and an unchecked slot is
+    // where `uid` being emitted as a number went unnoticed.
+    extension: { uid: '999' },
   })
   const records: OcsfRecord[] = []
   const collector: Sink = { write: record => { records.push(record) }, close: () => {} }
@@ -240,11 +458,9 @@ describe('OCSF 1.9.0 conformance', () => {
     }
   })
 
-  it('fills the record_integrity objects with the attributes the schema defines, and no others', () => {
-    const violations = new Set(records.flatMap((record) => {
-      const list = record.attestation_list ?? []
-      return list.flatMap(attestation => objectViolations('attestation', attestation as unknown as Record<string, unknown>))
-    }))
+  it('fills every nested object with the attributes its own OCSF object defines, and no others', () => {
+    expect(records.length).toBeGreaterThan(0)
+    const violations = new Set(records.flatMap(record => nestedViolations(record)))
     expect([...violations].sort()).toEqual([])
   })
 

@@ -207,6 +207,7 @@ export interface ToolDetails {
  * @param toolClass - its class.
  * @param args - its parsed arguments.
  * @param config - the resolved configuration.
+ * @param processUid - `process.uid` for a call that launches or ends a process.
  * @returns objects, observables, and extension attributes for the record.
  */
 export function toolDetails(
@@ -214,6 +215,7 @@ export function toolDetails(
   toolClass: ToolClass,
   args: ParsedArguments,
   config: ResolvedConfig,
+  processUid: string,
 ): ToolDetails {
   const observables: OcsfObservable[] = []
   const redacted = redactArguments(args.record, config.argumentValues, config.hmacKey)
@@ -233,7 +235,7 @@ export function toolDetails(
     return {
       // The subject of the launch is the external harness, named by the
       // provider that spawns it; the tool name is a deployment choice.
-      process: { name: provider },
+      process: { name: provider, uid: processUid },
       observables,
       attributes: {
         ...attributes,
@@ -253,6 +255,7 @@ export function toolDetails(
     return {
       process: {
         name: commandName(command) ?? toolName,
+        uid: processUid,
         ...command.length === 0 ? {} : { cmd_line: rendered },
       },
       observables,

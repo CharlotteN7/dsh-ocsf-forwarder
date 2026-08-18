@@ -132,6 +132,8 @@ export interface EventMapping {
   readonly statusId?: number
   readonly statusDetail?: string
   readonly message?: string
+  /** `exit_code`, which Process Activity defines at the top level of the record. */
+  readonly exitCode?: number
   readonly correlationUid?: string
   readonly startTime?: number
   readonly duration?: number
@@ -188,6 +190,7 @@ export function buildRecord(
     status_id: mapping.statusId,
     status_detail: mapping.statusDetail,
     message: mapping.message,
+    exit_code: mapping.exitCode,
     time: subject.time,
     start_time: mapping.startTime,
     end_time: mapping.duration === undefined ? undefined : subject.time,
@@ -235,8 +238,12 @@ export function buildRecord(
     // a host agent; emitted so records validate rather than fail ingestion.
     cloud: { provider: 'Other' },
     osint: [],
-    // API Activity requires a source endpoint. Other classes do not define the
-    // attribute, and every class is `additionalProperties: false`.
+    // API Activity requires a source endpoint. OCSF also defines `src_endpoint`
+    // on Authorize Session and HTTP Activity, but on a host agent the caller of
+    // an approval or a `web_fetch` is the same host the record already names in
+    // `device`, so it is emitted only where the class requires it. The four
+    // remaining classes do not define the attribute at all, and every class is
+    // `additionalProperties: false`.
     src_endpoint: mapping.classUid === CLASS.apiActivity ? env.srcEndpoint : undefined,
     ai_agent: compact({
       name: AGENT_NAME,
@@ -247,7 +254,13 @@ export function buildRecord(
       ai_model: subject.aiModel,
     }),
     ai_model: subject.aiModel,
-    message_context: mapping.messageContext,
+    // `message_context` constrains `at_least_one: [application, service]`. The
+    // application these messages belong to is the harness, which is the same
+    // one Application Lifecycle names, so it is filled in here rather than
+    // repeated by every mapper that builds one.
+    message_context: mapping.messageContext === undefined
+      ? undefined
+      : { ...mapping.messageContext, application: { name: AGENT_NAME, uid: config.fleet.installUid } },
     delegation: mapping.delegation,
     actor: env.actor,
     device: env.device,

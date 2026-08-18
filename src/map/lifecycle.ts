@@ -300,9 +300,19 @@ export function mapRequestHeader(event: { data: unknown }, config: ResolvedConfi
   }
 }
 
+/** The correlation id joining one hook's invocation and its result. */
+export function hookCorrelationUid(sessionId: string, handlerId: string): string {
+  return `${sessionId}:hook:${handlerId}`
+}
+
 /**
  * Map `hook/invoked`: a hook command is a subprocess the harness launched on
  * the agent's behalf.
+ *
+ * The payload never carries the child's OS pid, and the `process` object
+ * constrains `at_least_one: [pid, uid, cpid]`, so `process.uid` is the
+ * correlation id — the producer-assigned identifier the schema defines, shared
+ * with the `hook/result` record describing the same subprocess.
  * @param sessionId - the session the event belongs to.
  * @param event - the event's payload.
  * @returns the record mapping.
@@ -316,8 +326,8 @@ export function mapHookInvoked(sessionId: string, event: { data: unknown }): Eve
     severityId: SEVERITY.informational,
     statusId: STATUS.unknown,
     message: `hook ${point} invoked`,
-    correlationUid: `${sessionId}:hook:${handlerId}`,
-    process: { name: point },
+    correlationUid: hookCorrelationUid(sessionId, handlerId),
+    process: { name: point, uid: hookCorrelationUid(sessionId, handlerId) },
     attributes: {
       hook_point: point,
       handler_id: handlerId,
@@ -367,8 +377,10 @@ export function mapHookResult(sessionId: string, event: { data: unknown }, confi
     statusId: failed ? STATUS.failure : STATUS.success,
     statusDetail: decision,
     message: `hook ${point} decided ${decision}`,
-    correlationUid: `${sessionId}:hook:${handlerId}`,
-    process: { name: point, ...exitCode === undefined ? {} : { exit_code: exitCode } },
+    correlationUid: hookCorrelationUid(sessionId, handlerId),
+    process: { name: point, uid: hookCorrelationUid(sessionId, handlerId) },
+    // `exit_code` is a Process Activity attribute, not a `process` one.
+    ...exitCode === undefined ? {} : { exitCode },
     ...readNumber(event.data, 'durationMs') === undefined ? {} : { duration: readNumber(event.data, 'durationMs') as number },
     attributes: {
       hook_point: point,

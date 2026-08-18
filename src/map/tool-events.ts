@@ -27,7 +27,16 @@ import {
   type ToolClass,
 } from './tools.ts'
 
-/** The correlation id joining every record of one tool call. */
+/**
+ * The correlation id joining every record of one tool call.
+ *
+ * It is also the `process.uid` of a call that launches or ends a process: the
+ * OCSF `process` object constrains `at_least_one: [pid, uid, cpid]`, and the
+ * harness never reports the child's OS pid, so the identifier is the one the
+ * schema defines for a producer to assign — "a unique identifier for this
+ * process assigned by the producer (tool)", which the launch and the settlement
+ * records both carry.
+ */
 export function callCorrelationUid(sessionId: string, callId: string): string {
   return `${sessionId}:${callId}`
 }
@@ -75,15 +84,17 @@ function identityAttributes(
  * @param toolClass - the tool's class.
  * @param name - the tool name.
  * @param call - the paired call, when it was observed.
+ * @param processUid - `process.uid` when the call's own object is unavailable.
  * @returns the `process`, `file`, or `httpRequest` field for the mapping.
  */
 function subjectOf(
   toolClass: ToolClass,
   name: string,
   call: PendingCall | undefined,
+  processUid: string,
 ): Pick<EventMapping, 'process' | 'file' | 'httpRequest'> {
   if (toolClass === 'process-launch' || toolClass === 'process-terminate' || toolClass === 'delegation-external') {
-    return { process: call?.process ?? { name } }
+    return { process: call?.process ?? { name, uid: processUid } }
   }
   if (toolClass === 'file-read' || toolClass === 'file-write' || toolClass === 'file-update') {
     return { file: call?.file ?? { name, type_id: 1 } }
@@ -115,7 +126,8 @@ export function mapToolCall(
   const { classUid, activityId } = ocsfClassOf(toolClass)
   const turn = readNumber(event.data, 'turn') ?? 0
   const step = readNumber(event.data, 'step') ?? 0
-  const details = toolDetails(name, toolClass, argumentsOf(event.data), config)
+  const correlationUid = callCorrelationUid(sessionId, callId)
+  const details = toolDetails(name, toolClass, argumentsOf(event.data), config, correlationUid)
   const api = apiOf(toolClass, name)
   state.openCall({
     callId, name, toolClass, time: event.time, seq: event.seq, turn, step,
@@ -136,7 +148,7 @@ export function mapToolCall(
       ? `tool call ${name} delegates to ${config.delegationTools[name] ?? 'an external harness'}; `
         + 'session telemetry coverage ends at this boundary'
       : `tool call ${name}`,
-    correlationUid: callCorrelationUid(sessionId, callId),
+    correlationUid,
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
@@ -179,6 +191,7 @@ function settle(
   const name = call?.name ?? fallbackName
   const error = readNested(event.data, 'error')
   const api = apiOf(toolClass, name)
+  const correlationUid = callCorrelationUid(sessionId, callId)
   return {
     classUid,
     activityId,
@@ -186,10 +199,10 @@ function settle(
     statusId: isError ? STATUS.failure : STATUS.success,
     ...error === undefined ? {} : { statusDetail: `${String(error['name'])}: ${String(error['code'])}` },
     message: `tool result ${name}`,
-    correlationUid: callCorrelationUid(sessionId, callId),
+    correlationUid,
     ...call === undefined ? {} : { startTime: call.time, duration: Math.max(0, event.time - call.time) },
     ...api === undefined ? {} : { api },
-    ...subjectOf(toolClass, name, call),
+    ...subjectOf(toolClass, name, call, correlationUid),
     attributes: {
       tool: name,
       tool_class: toolClass,
@@ -245,7 +258,8 @@ export function mapCodeDispatchStart(
   if (name === undefined || subCallId === undefined) return undefined
   const toolClass = classifyTool(name, config)
   const { classUid, activityId } = ocsfClassOf(toolClass)
-  const details = toolDetails(name, toolClass, argumentsOf(event.data), config)
+  const correlationUid = callCorrelationUid(sessionId, subCallId)
+  const details = toolDetails(name, toolClass, argumentsOf(event.data), config, correlationUid)
   const api = apiOf(toolClass, name)
   state.openCall({
     callId: subCallId, name, toolClass, time: event.time, seq: event.seq, turn: 0, step: 0,
@@ -260,7 +274,7 @@ export function mapCodeDispatchStart(
     severityId: toolClass === 'delegation-external' ? SEVERITY.high : SEVERITY.informational,
     statusId: STATUS.unknown,
     message: `code-mode sub-call ${name}`,
-    correlationUid: callCorrelationUid(sessionId, subCallId),
+    correlationUid,
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
@@ -315,17 +329,18 @@ export function mapCodeDispatch(
 export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: number): EventMapping {
   const { classUid, activityId } = ocsfClassOf(call.toolClass)
   const api = apiOf(call.toolClass, call.name)
+  const correlationUid = callCorrelationUid(sessionId, call.callId)
   return {
     classUid,
     activityId,
     severityId: SEVERITY.low,
     statusId: STATUS.unknown,
     message: `tool call ${call.name} never settled`,
-    correlationUid: callCorrelationUid(sessionId, call.callId),
+    correlationUid,
     startTime: call.time,
     duration: Math.max(0, time - call.time),
     ...api === undefined ? {} : { api },
-    ...subjectOf(call.toolClass, call.name, call),
+    ...subjectOf(call.toolClass, call.name, call, correlationUid),
     attributes: {
       tool: call.name,
       tool_class: call.toolClass,

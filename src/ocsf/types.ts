@@ -143,9 +143,14 @@ export interface OcsfAiAgent {
   readonly ai_model?: OcsfAiModel
 }
 
-/** `message_context` of the `ai_operation` profile. */
+/**
+ * `message_context` of the `ai_operation` profile. The object constrains
+ * `at_least_one: [application, service]`; the application these messages belong
+ * to is the harness, and it is filled in when the record is composed.
+ */
 export interface OcsfMessageContext {
   readonly ai_role_id: number
+  readonly application?: OcsfApplication
   readonly uid?: string
   readonly prompt_text?: string
   readonly response_text?: string
@@ -161,13 +166,22 @@ export interface OcsfDelegation {
   readonly created_time?: number
 }
 
-/** A `process` object; also used for `actor.process`. */
+/**
+ * A `process` object; also used for `actor.process`.
+ *
+ * The object constrains `at_least_one: [pid, uid, cpid]`, so one of them is
+ * always set: `actor.process` carries the harness's own `pid`, and a process
+ * this plugin describes but never sees an OS identifier for carries `uid`, the
+ * producer-assigned identifier the schema defines for exactly that case.
+ * `exit_code` is not a `process` attribute — class 1007 defines it at the top
+ * level of the record.
+ */
 export interface OcsfProcess {
   readonly name?: string
   readonly pid?: number
   readonly cmd_line?: string
+  /** Producer-assigned identifier, repeated on every record about this process. */
   readonly uid?: string
-  readonly exit_code?: number
 }
 
 /** A `user` object. */
@@ -254,6 +268,8 @@ export interface OcsfRecord {
   readonly status_id?: number
   readonly status_detail?: string
   readonly message?: string
+  /** Defined by Process Activity at the top level, not by the `process` object. */
+  readonly exit_code?: number
   readonly start_time?: number
   readonly end_time?: number
   readonly duration?: number
