@@ -256,10 +256,13 @@ describe('hooks, subagents, workflows, compaction, schedules', () => {
       .toBeUndefined()
   })
 
-  it('reports a failed compaction', () => {
-    const mapping = mapEvent(SESSION, event('compaction/end', { compactionId: 'c1', turn: 1, error: 'model refused' }), new SessionState(), config)
+  it('reports a failed compaction without copying the rendered failure into the record', () => {
+    const mapping = mapEvent(SESSION, event('compaction/end', { compactionId: 'c1', turn: 1, error: 'model refused: found sk-live-1' }), new SessionState(), config)
     expect(mapping?.statusId).toBe(STATUS.failure)
-    expect(mapping?.statusDetail).toBe('model refused')
+    expect(mapping?.statusDetail).toBe('error')
+    expect(JSON.stringify(mapping)).not.toContain('sk-live-1')
+    expect(mapping?.attributes?.['error_digest']).toBeDefined()
+    expect(mapping?.attributes?.['error_length']).toBe(30)
   })
 
   it('maps a schedule change onto Scheduled Job Activity, reading the durable payload', () => {

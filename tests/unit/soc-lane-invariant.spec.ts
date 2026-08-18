@@ -52,8 +52,19 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
   inboxInserted: 'SENTINEL-inbox-use-key-AKIA5555EXAMPLE',
   retryFailure: 'SENTINEL-retry-upstream-echoed-authorization',
   searchQuery: 'SENTINEL-search-who-owns-1234-5678-9012',
+  compactionError: 'SENTINEL-compactionerr-refused-key-sk-99',
   scheduleId: 'SENTINEL-notasecret-schedule-id',
+  argumentKey: 'SENTINEL-notasecret-argument-key',
+  toolErrorName: 'SENTINEL-notasecret-tool-error-name',
+  hookMatcher: 'SENTINEL-notasecret-hook-matcher',
 })
+
+/**
+ * The values this lane carries verbatim on purpose, each named where
+ * `docs/operations.md` § Two lanes names it. The assertions below list these
+ * rather than a bare set, so widening the lane means changing this list.
+ */
+const DELIBERATE: readonly string[] = ['argumentKey', 'hookMatcher', 'scheduleId', 'toolErrorName']
 
 /**
  * Every text-bearing surface a session event offers, each carrying its own
@@ -133,9 +144,24 @@ function events(): MappableEvent[] {
       type: 'tool/call',
       seq: 14,
       time: 1_014,
-      data: { turn: 1, step: 0, callId: 'c5', name: 'mystery_tool', arguments: JSON.stringify({ token: SENTINELS['apiArgument'] }) },
+      // The model names its own arguments; the name is metadata a SOC groups
+      // on, and reaches `unmapped.dsh.arguments[].key` verbatim.
+      data: {
+        turn: 1,
+        step: 0,
+        callId: 'c5',
+        name: 'mystery_tool',
+        arguments: JSON.stringify({ token: SENTINELS['apiArgument'], [SENTINELS['argumentKey'] as string]: 1 }),
+      },
     },
-    { type: 'tool/result', seq: 15, time: 1_015, data: { message: { source: { callId: 'c5' } } } },
+    {
+      type: 'tool/result',
+      seq: 15,
+      time: 1_015,
+      // `error.name` and `error.code` name the failure class, and reach
+      // `status_detail` verbatim.
+      data: { message: { source: { callId: 'c5' } }, error: { name: SENTINELS['toolErrorName'], code: 'EPERM' } },
+    },
     {
       type: 'tool/call',
       seq: 16,
@@ -186,7 +212,7 @@ function events(): MappableEvent[] {
     },
     { type: 'approval/decided', seq: 23, time: 1_023, data: { id: 'a1', outcome: 'allowed-once' } },
     { type: 'sandbox/mode', seq: 24, time: 1_024, data: { mode: 'danger-full-access' } },
-    { type: 'hook/invoked', seq: 25, time: 1_025, data: { turn: 1, point: 'PreToolUse', handlerId: 'h1' } },
+    { type: 'hook/invoked', seq: 25, time: 1_025, data: { turn: 1, point: 'PreToolUse', handlerId: 'h1', matcher: SENTINELS['hookMatcher'] } },
     {
       type: 'hook/result',
       seq: 26,
@@ -249,6 +275,7 @@ function events(): MappableEvent[] {
     // A type this build has no mapper for takes the generic fallback, which
     // must read the payload's shape and never its content.
     { type: 'someone-elses-plugin/event', seq: 39, time: 1_039, data: { turn: 1, note: SENTINELS['prompt'] } },
+    { type: 'compaction/end', seq: 40, time: 1_040, data: { compactionId: 'k1', turn: 1, error: SENTINELS['compactionError'] } },
   ]
 }
 
@@ -289,10 +316,11 @@ describe('the SOC lane privacy invariant', () => {
   })
 
   it('carries no raw argument value, message text, or command line from any surface', () => {
-    // The schedule id is a durable record identifier a SOC pivots on, not
-    // content, and is emitted verbatim by design; it is in the table so that
-    // this assertion is a list of deliberate exceptions rather than a bare set.
-    expect(leaked(run().soc)).toEqual(['scheduleId'])
+    // Four values are verbatim by design and named as such on the operations
+    // page: a schedule id, a model-chosen argument name, a tool error's class
+    // name, and a hook's deployment-authored matcher. All four are metadata a
+    // SOC groups on, and a digest of any of them groups nothing.
+    expect(leaked(run().soc).sort()).toEqual([...DELIBERATE].sort())
   })
 
   it('puts every one of those values in front of the lane, so the search is not searching for nothing', () => {
@@ -305,15 +333,15 @@ describe('the SOC lane privacy invariant', () => {
   it('holds when a deployment opens one category, and opens only that one', () => {
     // `commandLine` covers both surfaces a command line arrives on: a shell
     // tool's `command` and a code tool's `code`.
-    expect(leaked(run({ privacy: { commandLine: 'full' } }).soc).sort()).toEqual(['code', 'command', 'scheduleId'])
-    expect(leaked(run({ privacy: { url: 'full' } }).soc).sort()).toEqual(['scheduleId', 'urlQuery'])
+    expect(leaked(run({ privacy: { commandLine: 'full' } }).soc).sort()).toEqual([...DELIBERATE, 'code', 'command'].sort())
+    expect(leaked(run({ privacy: { url: 'full' } }).soc).sort()).toEqual([...DELIBERATE, 'urlQuery'].sort())
   })
 
   it('carries the whole argument record only under the argument policy that says so', () => {
     const opened = leaked(run({ privacy: { argumentValues: 'full' } }).soc).sort()
     expect(opened).toEqual([
-      'apiArgument', 'code', 'command', 'fileBody', 'grepPattern', 'mcpArgument', 'scheduleId', 'urlQuery',
-    ])
+      ...DELIBERATE, 'apiArgument', 'code', 'command', 'fileBody', 'grepPattern', 'mcpArgument', 'urlQuery',
+    ].sort())
     // Opening the argument record does not open the command-line surfaces it
     // overlaps: `process.cmd_line` and its observable stay digested.
     const processRecords = run({ privacy: { argumentValues: 'full' } }).soc

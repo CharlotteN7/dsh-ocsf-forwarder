@@ -46,7 +46,7 @@ export default defineConfig({
         'src/map/heartbeat.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/index.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/interaction.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
-        'src/map/lifecycle.ts': { lines: 100, functions: 100, branches: 98.53, statements: 100 },
+        'src/map/lifecycle.ts': { lines: 100, functions: 100, branches: 99.03, statements: 100 },
         'src/map/tool-events.ts': { lines: 100, functions: 100, branches: 98.38, statements: 100 },
         'src/map/tools.ts': { lines: 100, functions: 100, branches: 95.65, statements: 100 },
         'src/ocsf/constants.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },

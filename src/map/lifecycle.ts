@@ -522,7 +522,10 @@ export function mapCompaction(
     activityId: eventType === 'compaction/prune' ? ACTIVITY.api.delete : ACTIVITY.api.update,
     severityId: eventType === 'compaction/prune' ? SEVERITY.low : SEVERITY.informational,
     statusId: error === undefined ? STATUS.success : STATUS.failure,
-    ...error === undefined ? {} : { statusDetail: error },
+    // `compaction/end.error` is a rendered failure — a model refusal, or a
+    // thrown exception's message — exactly the category `turn/end` digests.
+    // Copying it into `status_detail` put provider text in the SOC lane.
+    ...error === undefined ? {} : { statusDetail: 'error' },
     message: eventType,
     ...correlationUid === undefined ? {} : { correlationUid },
     ...started === undefined ? {} : { startTime: started, duration: Math.max(0, event.time - started) },
@@ -535,6 +538,10 @@ export function mapCompaction(
       ...readArrayLength(event.data, 'shadowedSeqs') === undefined ? {} : { shadowed_count: readArrayLength(event.data, 'shadowedSeqs') as number },
       ...shadowed === undefined ? {} : { shadowed_start: Number(shadowed['start'] ?? 0), shadowed_end: Number(shadowed['end'] ?? 0) },
       ...summary === undefined ? {} : { summary_digest: summary.digest, summary_length: summary.length },
+      ...error === undefined ? {} : {
+        error_digest: summariseText(error, config).digest,
+        error_length: error.length,
+      },
     },
   }
 }
