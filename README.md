@@ -58,7 +58,7 @@ Pin `@deepseek-ai/dsh-headless` explicitly — the `@deepseek-ai/dsh-*` librarie
 still points at `0.0.1-rc.1`. Install from the registry or a packed tarball, **not** from a git
 spec: `lib/` is a build output git does not carry.
 
-Runs on dsh `0.1.0-rc.6` through `0.1.2-alpha.5`; CI runs the end-to-end suite against every line
+Runs on dsh `0.1.0-rc.6` through the `0.1.1` line; CI runs the end-to-end suite against every line
 in that range.
 
 [Install in full →](https://charlotten7.github.io/dsh-ocsf-forwarder/install.html)

@@ -35,7 +35,7 @@ every one of these:
 **Peer ranges.** `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-session-telemetry` are
 
 ```
->=0.1.0-rc.6 <0.2.0 || >=0.1.1-rc.0 <0.1.2-0 || >=0.1.2-alpha.0 <0.1.3-0
+^0.1.0-rc.6 || ~0.1.1-rc.0
 ```
 
 which is longer than it looks like it should be because node-semver lets a prerelease satisfy a
