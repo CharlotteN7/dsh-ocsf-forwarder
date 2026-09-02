@@ -38,12 +38,18 @@ beforeAll(async () => {
 
 afterAll(() => { rmSync(dir, { recursive: true, force: true }) })
 
-/** Write one spool and run the shipped verifier over it. */
-function verify(name: string, lines: readonly string[]): { status: number; output: string } {
+/**
+ * Write one spool and run the shipped verifier over it.
+ * @param name - file name inside this suite's temporary directory.
+ * @param lines - the spool's contents.
+ * @param options - further arguments, placed before the spool path.
+ * @returns the exit status and everything the command printed.
+ */
+function verify(name: string, lines: readonly string[], ...options: readonly string[]): { status: number; output: string } {
   const path = join(dir, name)
   writeFileSync(path, `${lines.join('\n')}\n`)
   try {
-    return { status: 0, output: execFileSync(process.execPath, [VERIFIER, path], { encoding: 'utf8' }) }
+    return { status: 0, output: execFileSync(process.execPath, [VERIFIER, ...options, path], { encoding: 'utf8' }) }
   } catch (error: unknown) {
     const failure = error as { status: number; stdout: string }
     return { status: failure.status, output: failure.stdout }
@@ -94,5 +100,26 @@ describe('the record_integrity chain of a real run', () => {
     const result = verify('stripped.jsonl', stripped)
     expect(result.status).toBe(1)
     expect(result.output).toContain('unattested')
+  })
+
+  it('catches the end of the spool being cut off, against the heartbeat that had already shipped', () => {
+    // The heartbeat is a chain entry like any other, so the copy the SIEM holds
+    // states how far the chain had got. That is the one fact the surviving
+    // records cannot supply.
+    const anchorAt = spooled.findLastIndex(line => line.includes('"kind":"heartbeat"'))
+    expect(anchorAt).toBeGreaterThan(0)
+    const cut = spooled.slice(0, anchorAt)
+
+    // Erasing the most recent activity: the chain that is left still verifies.
+    const bare = verify('truncated.jsonl', cut)
+    expect(bare.status, bare.output).toBe(0)
+    expect(bare.output).toContain('INTACT')
+    expect(bare.output).toContain('no anchor')
+
+    const shipped = join(dir, 'shipped.jsonl')
+    writeFileSync(shipped, `${spooled[anchorAt] as string}\n`)
+    const anchored = verify('truncated.jsonl', cut, '--anchor', shipped)
+    expect(anchored.status, anchored.output).toBe(1)
+    expect(anchored.output).toContain('truncated')
   })
 })

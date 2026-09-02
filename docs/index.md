@@ -21,8 +21,9 @@ nav_order: 1
 - Emits a periodic **heartbeat** carrying its counters, the live session count and the delivery
   cursor, so a host that goes quiet is distinguishable from one that is idle. See
   [Heartbeat](shipping.md#heartbeat).
-- Chains every spooled record into an OCSF `record_integrity` attestation, so a record edited or
-  deleted after the fact is detectable — and ships `dsh-ocsf-verify` to check it. See
+- Chains every spooled record into an OCSF `record_integrity` attestation, so a record edited,
+  reordered, or deleted from the middle of the spool is detectable — and, against records the SIEM
+  already holds, so is a spool cut short at the end. Ships `dsh-ocsf-verify` to check both. See
   [Tamper-evidence](integrity.md), which also states plainly what the chain does **not** protect
   against.
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.

@@ -10,7 +10,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AttestingSink, attestRecord, canonicalJson, fingerprintOf } from '../../src/integrity/attest.ts'
-import { formatReport, main, spoolFiles, verifyRecords, type SpoolSource } from '../../src/integrity/verify.ts'
+import {
+  anchorsOf, formatReport, main, spoolFiles, verifyRecords, type SpoolSource,
+} from '../../src/integrity/verify.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import type { Sink } from '../../src/sink/spool.ts'
 
@@ -40,12 +42,21 @@ function record(uid: string, extra: Record<string, unknown> = {}): OcsfRecord {
   }
 }
 
-/** One chain of `count` attested records, as the lines a spool would hold. */
-function chainLines(count: number, chainUid = 'chain-1'): string[] {
+/**
+ * One chain of `count` attested records, as the lines a spool would hold.
+ * @param count - how many records the chain covers.
+ * @param chainUid - the chain identifier every entry carries.
+ * @param label - the message text, which is what distinguishes one run's
+ *   records from another run's over the same chain positions.
+ * @returns the serialized records, in the order they were written.
+ */
+function chainLines(count: number, chainUid = 'chain-1', label = 'event'): string[] {
   const lines: string[] = []
   const sink: Sink = { write: item => { lines.push(JSON.stringify(item)) }, close: () => {} }
   const chained = new AttestingSink(sink, chainUid)
-  for (let index = 0; index < count; index += 1) chained.write(record(`S1:${String(index)}`, { message: `event ${String(index)}` }))
+  for (let index = 0; index < count; index += 1) {
+    chained.write(record(`S1:${String(index)}`, { message: `${label} ${String(index)}` }))
+  }
   return lines
 }
 
@@ -227,6 +238,74 @@ describe('a tampered spool', () => {
   })
 })
 
+describe('a spool whose end was cut off', () => {
+  it('verifies clean by itself: every surviving link still matches', () => {
+    // The reason an anchor is needed at all, stated as the behaviour it works
+    // around rather than left implicit in the tests that follow.
+    const report = verify(chainLines(10).slice(0, 7))
+    expect(report.findings).toEqual([])
+    expect(report.intact).toBe(true)
+  })
+
+  it('is caught against a record that had already left the host', () => {
+    const lines = chainLines(10)
+    // What the SIEM holds: the entry the forwarder shipped before the cut.
+    const anchors = anchorsOf([lines[9] as string])
+    const report = verifyRecords([{ path: 'spool.jsonl', lines: lines.slice(0, 7) }], anchors)
+
+    expect(kinds(report)).toEqual(['truncated'])
+    expect(report.findings[0]).toMatchObject({ file: 'spool.jsonl', line: 7, uid: 'S1:6' })
+    expect(report.chains[0]).toMatchObject({ lastIndex: 6, anchoredThrough: 9 })
+    expect(report.intact).toBe(false)
+  })
+
+  it('catches a tail rewritten to the length the anchor accounts for', () => {
+    // Cutting the chain and writing a fresh consistent one over the same
+    // positions defeats a length check; the anchor pins which records those
+    // entries were, not just how many there were.
+    const anchors = anchorsOf([chainLines(10)[9] as string])
+    const report = verifyRecords([{ path: 'spool.jsonl', lines: chainLines(10, 'chain-1', 'nothing to see here') }], anchors)
+
+    expect(kinds(report)).toEqual(['anchor-mismatch'])
+    expect(report.findings[0]).toMatchObject({ line: 10, uid: 'S1:9' })
+  })
+
+  it('confirms anchors whose records are still where they were', () => {
+    const lines = chainLines(5)
+    const report = verifyRecords([{ path: 'spool.jsonl', lines }], anchorsOf([lines[2] as string, lines[4] as string]))
+    expect(report.findings).toEqual([])
+    expect(report.chains[0]).toMatchObject({ anchoredThrough: 4 })
+    expect(formatReport(report).join('\n')).toContain('anchored through entry 4')
+  })
+
+  it('says nothing about an anchor for an entry the shipper already drained', () => {
+    const lines = chainLines(5)
+    const report = verifyRecords([{ path: 'spool.jsonl', lines: lines.slice(2) }], anchorsOf([lines[1] as string]))
+    expect(report.findings).toEqual([])
+    expect(report.chains[0]).toMatchObject({ firstIndex: 2, anchoredThrough: 1 })
+  })
+
+  it('does not call an anchor for a chain that is not here a finding, and says it checked nothing', () => {
+    const report = verifyRecords(
+      [{ path: 'spool.jsonl', lines: chainLines(3, 'chain-b') }],
+      anchorsOf([chainLines(3, 'chain-a')[2] as string]),
+    )
+    expect(report.findings).toEqual([])
+    expect(report.unmatchedAnchors).toBe(1)
+    expect(report.intact).toBe(true)
+    expect(formatReport(report).join('\n')).toContain('1 anchor(s) name a chain with no records here')
+  })
+
+  it('takes no anchor from a line it cannot read a chain entry out of', () => {
+    expect(anchorsOf(['{"truncated":', JSON.stringify(record('S1:0')), ...chainLines(1)])).toHaveLength(1)
+  })
+
+  it('says of an unanchored chain that it cannot vouch for the chain\'s end', () => {
+    expect(formatReport(verify(chainLines(3))).join('\n'))
+      .toContain('no anchor — nothing here can show whether entries after 2 were removed')
+  })
+})
+
 describe('the verifier as a command', () => {
   it('verifies a spool on disk and exits zero', () => {
     const spool = join(dir, 'ocsf.jsonl')
@@ -267,6 +346,55 @@ describe('the verifier as a command', () => {
     const output: string[] = []
     expect(main([join(dir, 'absent.jsonl')], line => output.push(line))).toBe(2)
     expect(output[0]).toContain('ENOENT')
+  })
+
+  it('exits one on a spool cut short of what the anchor input accounts for', () => {
+    const spool = join(dir, 'ocsf.jsonl')
+    const shipped = join(dir, 'shipped.jsonl')
+    const lines = chainLines(10)
+    writeFileSync(spool, `${lines.slice(0, 7).join('\n')}\n`)
+    writeFileSync(shipped, `${lines[9] as string}\n`)
+
+    const output: string[] = []
+    expect(main(['--anchor', shipped, spool], line => output.push(line))).toBe(1)
+    expect(output.join('\n')).toContain(`truncated ${spool}:7`)
+    expect(output.join('\n')).toContain('anchored through entry 9')
+
+    // The same spool without the anchor: intact, and saying why that is not
+    // the same as whole.
+    const unanchored: string[] = []
+    expect(main([spool], line => unanchored.push(line))).toBe(0)
+    expect(unanchored.join('\n')).toContain('no anchor')
+  })
+
+  it('refuses an anchor input it read no chain entry out of, rather than reporting a check it did not make', () => {
+    const spool = join(dir, 'ocsf.jsonl')
+    const shipped = join(dir, 'shipped.jsonl')
+    writeFileSync(spool, `${chainLines(3).join('\n')}\n`)
+    writeFileSync(shipped, 'not a record\n')
+    const output: string[] = []
+    expect(main(['--anchor', shipped, spool], line => output.push(line))).toBe(2)
+    expect(output[0]).toContain('nothing was anchored')
+  })
+
+  it('exits two when the anchor input cannot be read', () => {
+    const spool = join(dir, 'ocsf.jsonl')
+    writeFileSync(spool, `${chainLines(3).join('\n')}\n`)
+    const output: string[] = []
+    expect(main(['--anchor', join(dir, 'absent.jsonl'), spool], line => output.push(line))).toBe(2)
+    expect(output[0]).toContain('ENOENT')
+  })
+
+  it('treats an option it does not take as a usage error rather than ignoring it', () => {
+    const spool = join(dir, 'ocsf.jsonl')
+    writeFileSync(spool, `${chainLines(3).join('\n')}\n`)
+    // A mistyped or swallowed --anchor that is quietly dropped turns the
+    // truncation check into a report that says INTACT and checked nothing.
+    const mistyped: string[] = []
+    expect(main(['--anchors', spool], line => mistyped.push(line))).toBe(2)
+    expect(mistyped[0]).toContain('usage: dsh-ocsf-verify')
+    expect(main(['--anchor'], () => {})).toBe(2)
+    expect(main(['--anchor', '--json', spool], () => {})).toBe(2)
   })
 
   it('does not call an empty spool intact: there is nothing there to have verified', () => {

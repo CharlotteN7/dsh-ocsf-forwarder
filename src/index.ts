@@ -42,8 +42,10 @@ export type { OcsfAttestation, OcsfFingerprint, OcsfPrevEvent, OcsfRecord } from
 export type { Transport, BatchOutcome } from './sink/transport.ts'
 export { Forwarder } from './forwarder.ts'
 export { AttestingSink, RECORD_INTEGRITY_PROFILE, attestRecord, canonicalJson, fingerprintOf } from './integrity/attest.ts'
-export { formatReport, spoolFiles, verifyRecords } from './integrity/verify.ts'
-export type { ChainFinding, ChainSummary, FindingKind, SpoolSource, VerifyReport } from './integrity/verify.ts'
+export { anchorsOf, formatReport, spoolFiles, verifyRecords } from './integrity/verify.ts'
+export type {
+  ChainAnchor, ChainFinding, ChainSummary, FindingKind, SpoolSource, VerifyReport,
+} from './integrity/verify.ts'
 
 /** Display metadata; labels the plugin in Cordis diagnostics. */
 export const name = 'dsh-ocsf-forwarder'

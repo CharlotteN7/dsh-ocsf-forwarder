@@ -98,17 +98,21 @@ delete an un-drained generation rather than silently discarding unacknowledged e
 ## Tamper-evidence
 
 Every record carries an OCSF 1.9.0 `record_integrity` attestation: the SHA-256 fingerprint of the
-record, plus the uid and fingerprint of the record before it. Editing, deleting, or reordering a
-spooled record breaks the chain at that record and at the one after it.
+record, plus the uid and fingerprint of the record before it. Editing, reordering, or deleting a
+record from the middle of a spool breaks the chain at that record and at the one after it.
 
 ```sh
-dsh-ocsf-verify /var/log/dsh/ocsf.jsonl   # exits 0 intact, 1 broken, 2 unreadable
+dsh-ocsf-verify /var/log/dsh/ocsf.jsonl                       # 0 intact, 1 broken, 2 unreadable
+dsh-ocsf-verify --anchor shipped.jsonl /var/log/dsh/ocsf.jsonl
 ```
 
+Deleting from the **end** breaks nothing — the shorter chain still verifies — so that check needs a
+reference the writer cannot reach. Every shipped record is one: `--anchor` takes records back from
+the SIEM and reports a spool that stops short of them. Without anchors the report says `no anchor`
+rather than implying it checked.
+
 The fingerprints are **unkeyed**, so anyone can recompute them — which is the point, and which also
-means the chain does not resist the agent it observes. What it detects is a later edit by anything
-that does not recompute the chain, and it makes every record already shipped to a SIEM an anchor
-the spool can be checked against.
+means the chain does not resist the agent it observes.
 
 [The canonicalisation, the threat model, and the cost →](https://charlotten7.github.io/dsh-ocsf-forwarder/integrity.html)
 

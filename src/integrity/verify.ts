@@ -6,6 +6,14 @@
  * spool files and the algorithm is the one written down in `docs/integrity.md`,
  * so this program is a reference implementation of a check a third party can
  * write themselves rather than a privileged verifier.
+ *
+ * **A spool cannot show that its own end was cut off.** Removing entries from
+ * the end of a chain leaves a shorter chain whose every remaining link still
+ * matches, so it verifies clean; only an interior deletion breaks anything.
+ * Detecting a suffix truncation needs a reference from outside the file, which
+ * is what a {@link ChainAnchor} is: the chain position and fingerprint of a
+ * record that already left the host. Anchors are optional and a verification
+ * without them is honest about what it did not check.
  * @module integrity/verify
  */
 
@@ -29,6 +37,10 @@ export type FindingKind =
   | 'missing-records'
   /** This record's chain position is at or before the record before it. */
   | 'out-of-order'
+  /** The chain stops before an entry an anchor already accounts for. */
+  | 'truncated'
+  /** The record at an anchor's chain position is not the record the anchor came from. */
+  | 'anchor-mismatch'
 
 /** One thing wrong with one record, located precisely enough to act on. */
 export interface ChainFinding {
@@ -39,6 +51,23 @@ export interface ChainFinding {
   /** The record's `metadata.uid`, when the line parsed far enough to have one. */
   readonly uid: string | undefined
   readonly detail: string
+}
+
+/**
+ * One chain position a reader already holds a copy of, taken from a record that
+ * left the host before the spool could be rewritten.
+ *
+ * This is the external reference a suffix truncation is detected against. The
+ * index says how far the chain had got, which the surviving records cannot; the
+ * fingerprint says which record was there, so a tail rewritten to the right
+ * length is caught as well as one simply cut short.
+ */
+export interface ChainAnchor {
+  readonly chainUid: string
+  /** The entry index the shipped record occupied. */
+  readonly index: number
+  /** The fingerprint that record carried. */
+  readonly fingerprint: string
 }
 
 /** What one chain looked like across the whole input. */
@@ -53,6 +82,12 @@ export interface ChainSummary {
    * deleted. The spool alone cannot tell those apart; the shipper cursor can.
    */
   readonly complete: boolean
+  /**
+   * The highest entry index an anchor accounts for. Absent when no anchor named
+   * this chain, which is the state in which a suffix truncation of it is
+   * undetectable from this input.
+   */
+  readonly anchoredThrough?: number
 }
 
 /** The result of verifying one set of spool files. */
@@ -62,6 +97,12 @@ export interface VerifyReport {
   readonly attested: number
   readonly chains: readonly ChainSummary[]
   readonly findings: readonly ChainFinding[]
+  /**
+   * Anchors naming a chain with no records in this input. Not a finding: a
+   * chain whose every generation the shipper drained and unlinked looks exactly
+   * like one deleted wholesale, and the spool cannot tell them apart.
+   */
+  readonly unmatchedAnchors: number
   /** True when every record was attested and nothing was found wrong. */
   readonly intact: boolean
 }
@@ -84,6 +125,13 @@ interface ChainEntry {
   readonly recomputed: string
 }
 
+/** Where one record sits in the input. */
+interface Location {
+  readonly file: string
+  /** 1-based line number within the file. */
+  readonly line: number
+}
+
 /** The chain state carried from one record to the next. */
 interface ChainState {
   records: number
@@ -91,6 +139,8 @@ interface ChainState {
   lastIndex: number
   lastUid: string
   lastFingerprint: string
+  /** Where the chain's last entry so far is, which is where a truncation shows. */
+  lastAt: Location
 }
 
 /** One field of an untrusted object, when it is a string. */
@@ -142,14 +192,44 @@ function inspect(record: Record<string, unknown>): ChainEntry | undefined {
 }
 
 /**
+ * Take the anchors out of records a reader already holds — a SIEM export of
+ * what this installation shipped, one JSON record per line.
+ *
+ * Only the attestation is read, so an export that reordered or dropped other
+ * attributes still yields a usable anchor. A line that is not JSON, or a record
+ * carrying no attestation this verifier can read, yields nothing; the caller
+ * decides what an anchor input that yielded nothing means.
+ * @param lines - the exported records, one per line.
+ * @returns the anchors found, in the order the lines gave them.
+ */
+export function anchorsOf(lines: readonly string[]): readonly ChainAnchor[] {
+  const anchors: ChainAnchor[] = []
+  for (const text of lines) {
+    let record: Record<string, unknown>
+    try {
+      record = JSON.parse(text) as Record<string, unknown>
+    } catch {
+      // A JSON parse failure only: an export that wrote something other than
+      // one record per line contributes no anchor rather than failing the run.
+      continue
+    }
+    const entry = inspect(record)
+    if (entry === undefined) continue
+    anchors.push({ chainUid: entry.chainUid, index: entry.index, fingerprint: entry.claimed })
+  }
+  return anchors
+}
+
+/**
  * Check one record against the chain state its predecessor left, and update
  * that state.
  * @param entry - the record's attestation.
  * @param uid - the record's `metadata.uid`, the locator its successor references.
+ * @param at - where the record is in the input.
  * @param chains - the state of every chain seen so far, updated in place.
  * @returns the findings this record produced.
  */
-function link(entry: ChainEntry, uid: string, chains: Map<string, ChainState>): FindingKind[] {
+function link(entry: ChainEntry, uid: string, at: Location, chains: Map<string, ChainState>): FindingKind[] {
   const state = chains.get(entry.chainUid)
   const kinds: FindingKind[] = []
   if (state === undefined) {
@@ -162,6 +242,7 @@ function link(entry: ChainEntry, uid: string, chains: Map<string, ChainState>): 
       lastIndex: entry.index,
       lastUid: uid,
       lastFingerprint: entry.claimed,
+      lastAt: at,
     })
     return kinds
   }
@@ -174,6 +255,7 @@ function link(entry: ChainEntry, uid: string, chains: Map<string, ChainState>): 
   state.lastIndex = entry.index
   state.lastUid = uid
   state.lastFingerprint = entry.claimed
+  state.lastAt = at
   return kinds
 }
 
@@ -186,7 +268,20 @@ const DETAIL: Readonly<Record<FindingKind, string>> = Object.freeze({
   'broken-link': 'prev_event does not match the record before it in this input',
   'missing-records': 'chain entries between the previous record and this one are not present',
   'out-of-order': 'chain entry is at or before the previous record of the same chain',
+  'truncated': 'the chain ends here, before an entry an anchor taken off this host accounts for',
+  'anchor-mismatch': 'this chain entry is not the record the anchor for the same position came from',
 })
+
+/** The anchors of one input, grouped by the chain each names. */
+function byChain(anchors: readonly ChainAnchor[]): Map<string, ChainAnchor[]> {
+  const grouped = new Map<string, ChainAnchor[]>()
+  for (const anchor of anchors) {
+    const existing = grouped.get(anchor.chainUid)
+    if (existing === undefined) grouped.set(anchor.chainUid, [anchor])
+    else existing.push(anchor)
+  }
+  return grouped
+}
 
 /**
  * Verify the chains across one ordered set of spool files.
@@ -195,11 +290,18 @@ const DETAIL: Readonly<Record<FindingKind, string>> = Object.freeze({
  * how a spool and its rotated generations relate: rotation renames a file, it
  * does not end a chain.
  * @param sources - the files and their lines, oldest first.
+ * @param anchors - chain positions held outside this input, against which a
+ *   truncated or rewritten tail is detected. Without them the chain's end is
+ *   whatever the file says it is.
  * @returns what was checked and everything found wrong.
  */
-export function verifyRecords(sources: readonly SpoolSource[]): VerifyReport {
+export function verifyRecords(
+  sources: readonly SpoolSource[],
+  anchors: readonly ChainAnchor[] = [],
+): VerifyReport {
   const findings: ChainFinding[] = []
   const chains = new Map<string, ChainState>()
+  const anchored = byChain(anchors)
   let records = 0
   let attested = 0
   for (const source of sources) {
@@ -224,30 +326,52 @@ export function verifyRecords(sources: readonly SpoolSource[]): VerifyReport {
       }
       attested += 1
       const kinds = entry.recomputed === entry.claimed ? [] : ['altered' as const]
-      for (const kind of [...kinds, ...link(entry, uid ?? '', chains)]) {
+      const contradicted = (anchored.get(entry.chainUid) ?? [])
+        .some(anchor => anchor.index === entry.index && anchor.fingerprint !== entry.claimed)
+      const mismatch: FindingKind[] = contradicted ? ['anchor-mismatch'] : []
+      for (const kind of [...kinds, ...mismatch, ...link(entry, uid ?? '', at, chains)]) {
         findings.push({ ...at, kind, uid, detail: DETAIL[kind] })
       }
     }
   }
-  const chainSummaries = [...chains].map(([chainUid, state]): ChainSummary => ({
-    chainUid,
-    records: state.records,
-    firstIndex: state.firstIndex,
-    lastIndex: state.lastIndex,
-    complete: state.firstIndex === 0,
-  }))
+  const chainSummaries: ChainSummary[] = []
+  for (const [chainUid, state] of chains) {
+    const through = (anchored.get(chainUid) ?? []).reduce((highest, anchor) => Math.max(highest, anchor.index), -1)
+    // The one check the records themselves cannot make: an anchor accounts for
+    // an entry past the end of the chain in this input, so the end was cut off.
+    if (through > state.lastIndex) {
+      findings.push({ ...state.lastAt, kind: 'truncated', uid: state.lastUid, detail: DETAIL['truncated'] })
+    }
+    chainSummaries.push({
+      chainUid,
+      records: state.records,
+      firstIndex: state.firstIndex,
+      lastIndex: state.lastIndex,
+      complete: state.firstIndex === 0,
+      ...through < 0 ? {} : { anchoredThrough: through },
+    })
+  }
   return {
     files: sources.map(source => source.path),
     records,
     attested,
     chains: chainSummaries,
     findings,
+    unmatchedAnchors: anchors.filter(anchor => !chains.has(anchor.chainUid)).length,
     intact: findings.length === 0 && records > 0,
   }
 }
 
 /** Findings printed in full before the rest are counted. */
 const MAX_PRINTED_FINDINGS = 20
+
+/** What one chain's line says about the anchors that did or did not cover it. */
+function anchorNote(chain: ChainSummary): string {
+  if (chain.anchoredThrough === undefined) {
+    return `, no anchor — nothing here can show whether entries after ${String(chain.lastIndex)} were removed`
+  }
+  return `, anchored through entry ${String(chain.anchoredThrough)}`
+}
 
 /**
  * Render a report for a terminal.
@@ -265,7 +389,14 @@ export function formatReport(report: VerifyReport): string[] {
       + `${String(chain.firstIndex)}-${String(chain.lastIndex)}`
       + (chain.complete
         ? ', from its genesis entry'
-        : `, genesis absent — entries 0-${String(chain.firstIndex - 1)} are not in this input`),
+        : `, genesis absent — entries 0-${String(chain.firstIndex - 1)} are not in this input`)
+      + anchorNote(chain),
+    )
+  }
+  if (report.unmatchedAnchors > 0) {
+    lines.push(
+      `  ${String(report.unmatchedAnchors)} anchor(s) name a chain with no records here; `
+      + 'a chain whose generations the shipper drained looks the same as one deleted',
     )
   }
   for (const finding of report.findings.slice(0, MAX_PRINTED_FINDINGS)) {
@@ -305,12 +436,63 @@ function readLines(path: string): SpoolSource {
 
 /** How the command is used, printed on a usage error and on `--help`. */
 const USAGE = [
-  'usage: dsh-ocsf-verify [--json] <spool path>...',
+  'usage: dsh-ocsf-verify [--json] [--anchor <exported records>]... <spool path>...',
   '',
   'Verifies the OCSF record_integrity hash chain of one or more spool files.',
   'Each path is verified together with its rotated generations, oldest first.',
+  '',
+  'A chain cannot show that its own end was cut off: removing entries from the',
+  'end leaves a shorter chain whose every link still matches. --anchor takes',
+  'records this installation already shipped, as the SIEM holds them, one JSON',
+  'record per line, and reports a chain that stops short of what they account',
+  'for. Without it a suffix truncation is not detected and the report says so.',
+  '',
   'Exit status: 0 intact, 1 findings, 2 the input could not be read.',
 ]
+
+/** One parse of the command line. */
+interface Invocation {
+  readonly paths: readonly string[]
+  readonly anchorPaths: readonly string[]
+  readonly json: boolean
+  /** The usage was asked for, which is the whole job. */
+  readonly help: boolean
+  /** An option this command does not take, or `--anchor` with nothing after it. */
+  readonly malformed: boolean
+}
+
+/**
+ * Read the command line.
+ *
+ * An unknown option is a usage error rather than something to ignore: a
+ * mistyped `--anchor` that is silently dropped turns a truncation check into a
+ * report that says INTACT and checked nothing.
+ * @param argv - arguments after the program name.
+ * @returns what the invocation asked for.
+ */
+function parse(argv: readonly string[]): Invocation {
+  const paths: string[] = []
+  const anchorPaths: string[] = []
+  let json = false
+  let help = false
+  let malformed = false
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] as string
+    if (argument === '--json') json = true
+    else if (argument === '--help') help = true
+    else if (argument === '--anchor') {
+      const next = argv[index + 1]
+      if (next === undefined || next.startsWith('--')) malformed = true
+      else {
+        anchorPaths.push(next)
+        index += 1
+      }
+    }
+    else if (argument.startsWith('--')) malformed = true
+    else paths.push(argument)
+  }
+  return { paths, anchorPaths, json, help, malformed }
+}
 
 /**
  * Run the verifier as a command.
@@ -319,19 +501,22 @@ const USAGE = [
  * @returns the process exit status.
  */
 export function main(argv: readonly string[], write: (line: string) => void): number {
-  const paths = argv.filter(argument => !argument.startsWith('--'))
-  const json = argv.includes('--json')
-  if (argv.includes('--help')) {
+  const invocation = parse(argv)
+  if (invocation.help) {
     for (const line of USAGE) write(line)
     return 0
   }
-  if (paths.length === 0) {
+  if (invocation.malformed || invocation.paths.length === 0) {
     for (const line of USAGE) write(line)
     return 2
   }
   let sources: SpoolSource[]
+  let anchors: readonly ChainAnchor[]
   try {
-    sources = paths.flatMap(path => spoolFiles(path)).map(file => readLines(file))
+    sources = invocation.paths.flatMap(path => spoolFiles(path)).map(file => readLines(file))
+    // Anchor inputs are exports, not spools: they have no rotated generations
+    // and their line order carries no meaning.
+    anchors = anchorsOf(invocation.anchorPaths.flatMap(path => readLines(path).lines))
   } catch (error: unknown) {
     // Rendered whole rather than reduced to `message`: for a `node:fs` failure
     // that is the errno code, the syscall, and the path, which is what tells an
@@ -339,8 +524,14 @@ export function main(argv: readonly string[], write: (line: string) => void): nu
     write(`dsh-ocsf-verify: ${String(error)}`)
     return 2
   }
-  const report = verifyRecords(sources)
-  if (json) write(JSON.stringify(report))
+  if (invocation.anchorPaths.length > 0 && anchors.length === 0) {
+    // Asking for the anchored check and getting none of it must not read as a
+    // clean verification of a chain whose end was never checked.
+    write('dsh-ocsf-verify: no attestation this verifier can read in the anchor input; nothing was anchored')
+    return 2
+  }
+  const report = verifyRecords(sources, anchors)
+  if (invocation.json) write(JSON.stringify(report))
   else for (const line of formatReport(report)) write(line)
   return report.intact ? 0 : 1
 }

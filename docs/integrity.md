@@ -9,7 +9,9 @@ nav_order: 7
 
 Every spooled record carries an OCSF 1.9.0 `record_integrity` attestation: the SHA-256 fingerprint
 of the record itself, plus the uid and fingerprint of the record written before it. The chain lets
-a reader tell whether the spool they are holding is the spool that was written.
+a reader tell whether the records they are holding are the records that were written — but not, on
+its own, whether there were more of them. That last question needs an
+[anchor](#truncation-the-deletion-the-chain-cannot-see).
 
 **Read [what this does not protect against](#what-the-chain-does-not-protect-against) before you
 rely on it.** It is a shorter list than the marketing for this kind of feature usually admits.
@@ -37,7 +39,7 @@ rely on it.** It is a shorter list than the marketing for this kind of feature u
 
 | Attribute | Value |
 |---|---|
-| `attestation.uid` | `<chain_uid>:<entry index>`, counting from `0`. The index is what makes a deletion visible: entries are consecutive within a chain. |
+| `attestation.uid` | `<chain_uid>:<entry index>`, counting from `0`. Entries are consecutive within a chain, which is what makes an **interior** deletion visible. A deletion at the end leaves a shorter run of consecutive entries and is invisible here; see [Truncation](#truncation-the-deletion-the-chain-cannot-see). |
 | `attestation.chain_uid` | A UUID minted per process **per lane**. The SOC and restricted lanes are separate files carrying different records, so each has its own chain; a link that pointed into the other file could not be checked from the file it is in. |
 | `attestation.fingerprint` | SHA-256 (`algorithm_id: 3`) of this record's canonical serialization, hex (`encoding_id: 1`). |
 | `attestation.prev_event` | The previous record's `metadata.uid`, `type_uid`, and fingerprint. Absent on the chain's genesis entry, and only there. |
@@ -178,10 +180,75 @@ A verifier therefore distinguishes three things a spool file can show:
 | A chain whose first entry is `0`, with no `prev_event` | A process started here. Nothing is missing before it. |
 | A chain whose first entry is `N > 0`, with a `prev_event` | Entries `0…N-1` are not in this input. Normal after the shipper drained and unlinked a generation; also what deleting the front of a spool looks like. The spool alone cannot tell those apart — the shipper's cursor can, and so can the SIEM, which already has the delivered entries. |
 | An interior jump from entry `N` to `N+2`, or a `prev_event` that does not match the record before it | Records were removed, reordered, or edited. This is a break. |
+| A chain whose last entry is `N`, with nothing after it | The writer stopped there — or entries after `N` were removed. **Nothing in the spool tells those apart**; see [Truncation](#truncation-the-deletion-the-chain-cannot-see). |
 
 Because a whole chain can be deleted without leaving a trace *in the spool*, the count of chains is
 not evidence of anything by itself. What makes deletion visible is the copy that already left the
-host: configure a shipper.
+host: configure a shipper, and check the spool against what it delivered.
+
+## Truncation: the deletion the chain cannot see
+
+Every record links to the one before it, so deleting a record breaks the record after the hole.
+Delete from the **end** and there is no record after the hole. What is left is a shorter chain whose
+every remaining link still matches, and it verifies clean:
+
+```
+clean spool                INTACT   exit 0
+interior record deleted    BROKEN   exit 1
+last 3 records removed     INTACT   exit 0
+```
+
+This needs no key, no code, and no privilege beyond writing the file, and erasing one's own recent
+activity is the tampering to expect. **No arrangement of hashes inside the file fixes it.** How long
+a chain should be is not derivable from the chain; it has to come from somewhere the writer of the
+file cannot reach.
+
+### Anchors
+
+That somewhere is the copy that already left the host. Every shipped record carries its own
+attestation, so for each record the SIEM holds the chain it belonged to, the entry index it
+occupied, and its fingerprint. Any one of them is an **anchor**: a claim that the chain reached at
+least that entry, made by a party who cannot edit the spool.
+
+`dsh-ocsf-verify --anchor` takes those records back — as the SIEM holds them, one JSON record per
+line — and reports the two things the spool alone cannot show:
+
+| Finding | What it means |
+|---|---|
+| `truncated` | The chain in this input stops before an entry an anchor accounts for. Records were removed from the end. |
+| `anchor-mismatch` | The record at an anchored entry is not the record that was shipped. A tail rewritten to the right length, rather than simply cut. |
+
+```sh
+dsh-ocsf-verify --anchor shipped.jsonl /var/log/dsh/ocsf.jsonl
+```
+
+Only `attestation_list` is read out of an anchor record, so a SIEM export that reordered or dropped
+other attributes still anchors. An anchor input the verifier can read no attestation out of exits
+`2` rather than reporting a check it did not make.
+
+The [heartbeat](shipping.md#heartbeat) is what keeps an anchor available on a quiet host. It is an
+ordinary chain entry, it ships like every other record, and one is written every `statsIntervalMs`
+and one more at unload — so asking the SIEM for an installation's most recent record always returns
+something to anchor against, even for a host that did nothing.
+
+### What anchoring buys, and what it does not
+
+- **It is not a local check.** A `dsh-ocsf-verify` run against a truncated spool with no anchors
+  cannot tell, and nothing can make it. It says so instead: every chain line reports either the
+  entry an anchor covers it through or `no anchor`, and `INTACT` on an unanchored chain claims only
+  that the records present are consistent with each other.
+- **The residual window is whatever has not been delivered.** Records written after the last one
+  the collector acknowledged have no anchor and remain silently removable — one `flushIntervalMs`,
+  five seconds by default. An operator who anchors on the heartbeat alone rather than on the newest
+  record of any kind has a window of one `statsIntervalMs` instead, five minutes by default. With
+  no shipper configured nothing leaves the host, there are no anchors, and suffix truncation is
+  undetectable outright.
+- **An anchor naming a chain with no records in the input is not a finding.** A chain whose
+  generations the shipper drained and unlinked looks exactly like one deleted wholesale. The report
+  counts those anchors and names the ambiguity rather than guessing at it.
+- **An agent that can rewrite the spool can also stop the forwarder**, and that is a different
+  failure — a louder one. The heartbeats stop, which is detectable at the SIEM by the absence rules
+  in [Heartbeat](shipping.md#heartbeat), and no anchor is needed to see it.
 
 ## What the chain does not protect against
 
@@ -202,14 +269,16 @@ What the chain does buy:
 - **A later edit is detected.** Anything that changes a spooled record — an editor, a log-mangling
   script, a corrupted copy, a helpful "cleanup", a second process that got past the lock file — is
   visible at the record it touched and at the record after it.
-- **A deletion is detected**, by the gap in consecutive chain entries, which is stronger than the
-  per-session `metadata.sequence` gap detector because it covers every record in the file including
-  heartbeats and records from other sessions.
+- **An interior deletion is detected**, by the gap in consecutive chain entries, which is stronger
+  than the per-session `metadata.sequence` gap detector because it covers every record in the file
+  including heartbeats and records from other sessions. **A deletion at the end of the file is
+  not**: see [Truncation](#truncation-the-deletion-the-chain-cannot-see), which needs an anchor
+  from the shipped stream and cannot be done locally at all.
 - **Records already off the host become anchors.** The SIEM holds fingerprints for everything
-  shipped. Any later rewrite of the spool must either keep those records byte-identical or produce
-  a chain that disagrees with what the SIEM already has. The undetectable-tampering window is the
-  time between a record being written and being delivered — one `flushIntervalMs`, five seconds by
-  default.
+  shipped. Any later rewrite of the spool must either leave those records exactly as they were or
+  produce a chain that disagrees with what the SIEM already has, and `dsh-ocsf-verify --anchor`
+  makes that comparison. The undetectable-tampering window is the time between a record being
+  written and being delivered — one `flushIntervalMs`, five seconds by default.
 - **Nothing about the agent's honesty.** A record that was never written is not missing from a
   chain that never contained it. This is tamper-evidence for the audit trail, not attestation of
   the agent's behaviour.
@@ -218,25 +287,33 @@ What the chain does buy:
 
 ```sh
 dsh-ocsf-verify /var/log/dsh/ocsf.jsonl
+dsh-ocsf-verify --anchor shipped.jsonl /var/log/dsh/ocsf.jsonl
 ```
 
 The command is installed with the package (`node_modules/.bin/dsh-ocsf-verify`). It takes one or
 more spool paths, verifies each together with its rotated generations oldest-first, and exits `0`
-when the input is intact, `1` when it is not, and `2` when it could not be read. `--json` prints the
-whole report — every finding with its file, line, and record uid — for a scheduled check.
+when the input is intact, `1` when it is not, and `2` when it could not be read. `--anchor` is
+repeatable and names records the SIEM already holds; without it the end of every chain is taken on
+the file's word. `--json` prints the whole report — every finding with its file, line, and record
+uid — for a scheduled check. An option the command does not take is a usage error rather than
+something ignored, because a dropped `--anchor` would report a truncation check that never ran.
 
 ```
 3241 record(s) in 2 file(s), 3241 attested, 1 chain(s)
-  chain 7a1f0c5e-…: 3241 record(s), entries 0-3240, from its genesis entry
+  chain 7a1f0c5e-…: 3241 record(s), entries 0-3240, from its genesis entry, anchored through entry 3240
 INTACT: every record hashes to its own fingerprint and every link matches.
 ```
 
-The finding kinds are `altered`, `broken-link`, `missing-records`, `out-of-order`, `unattested`,
-`malformed`, and `unparsable`. An empty input reports `NOT VERIFIED` and exits `1`: an audit tool
-that exits `0` on a file with nothing in it reports the absence of evidence as evidence.
+Unanchored, the same chain line ends `no anchor — nothing here can show whether entries after 3240
+were removed`, which is the honest reading of `INTACT` on a file nobody corroborated.
 
-The same check is available programmatically — `verifyRecords`, `formatReport`, and `spoolFiles` are
-exported from the package root — and the algorithm is small enough that the reference
+The finding kinds are `altered`, `broken-link`, `missing-records`, `out-of-order`, `unattested`,
+`malformed`, `unparsable`, and — only when anchors were supplied — `truncated` and
+`anchor-mismatch`. An empty input reports `NOT VERIFIED` and exits `1`: an audit tool that exits `0` on a
+file with nothing in it reports the absence of evidence as evidence.
+
+The same check is available programmatically — `verifyRecords`, `anchorsOf`, `formatReport`, and
+`spoolFiles` are exported from the package root — and the algorithm is small enough that the reference
 implementation above is a reasonable thing to run instead.
 
 ## Cost

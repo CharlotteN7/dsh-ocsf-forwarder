@@ -71,6 +71,12 @@ A heartbeat belongs to no session. It carries no `ai_agent.instance_uid` and no
 `metadata.sequence` is that `n`, so a *missing* heartbeat is detectable and not only a malformed
 one. It is deliberately absent from the counters it reports.
 
+It is also an ordinary entry in the spool's `record_integrity` chain, which is what makes it the
+**anchor** a truncated spool is caught against: the shipped copy states how far the chain had got,
+and the records still in the file cannot. A quiet host emits nothing else, so without the heartbeat
+there would be no recent record to anchor on. See
+[Truncation](integrity.md#truncation-the-deletion-the-chain-cannot-see).
+
 | Attribute | Meaning |
 |---|---|
 | `live_sessions` | Sessions the store held when the heartbeat was taken. |

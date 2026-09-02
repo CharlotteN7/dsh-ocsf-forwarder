@@ -855,3 +855,47 @@ so. The two branches also disagreed: an endpoint that already named a path kept 
 
 The query is preserved in both branches now. This is a silent-misdelivery fix, not a validation one:
 there was no value to reject, only a value to stop discarding.
+
+## 44. A suffix truncation is caught against a shipped record, and by nothing local
+
+Against the shipped verifier, three spools built from one chain:
+
+```
+clean spool                INTACT   exit 0
+interior record deleted    BROKEN   exit 1
+last 3 records removed     INTACT   exit 0
+```
+
+Each record links to its predecessor, so a deletion breaks the record *after* the hole. Delete from
+the end and there is no record after the hole: what remains is a shorter chain whose every link
+still matches. `docs/integrity.md` claimed "a deletion is detected, by the gap in consecutive chain
+entries" — true of an interior deletion, false of a suffix one, and the suffix one is the tampering
+to expect, because erasing one's own recent activity needs no key and no code.
+
+**How long a chain should be is not derivable from the chain.** No arrangement of hashing inside the
+file fixes this; the length has to come from a party that cannot rewrite the file. So
+`dsh-ocsf-verify --anchor` takes records back from the SIEM — one JSON record per line, as an export
+gives them — and reports `truncated` when a chain stops before an entry an anchor accounts for, and
+`anchor-mismatch` when the record at an anchored entry is not the one that shipped. The second is
+what stops a tail rewritten to the right length from passing a length check.
+
+**Rejected: adding the chain head to the heartbeat payload.** That was the obvious mechanism and it
+is already built. Every attested record carries `attestation.uid` = `<chain_uid>:<entry index>` and
+`attestation.prev_event.fingerprint`, both inside the hashed content, and the shipper posts spool
+lines verbatim — so a shipped heartbeat *is* the claim "this chain reached entry N, and entry N-1
+was this record". Copying those into `unmapped.dsh` would have added a field that is wrong in one of
+the two lanes: the heartbeat record is built once and written to both chains, which have different
+`chain_uid`s and different indices, so it would have had to be built per lane to carry a per-lane
+fact already printed on the record beside it. It would also have needed new SOC-lane sentinels for a
+value that is a hash. The heartbeat's real contribution is that it exists at all: it is what puts a
+recent entry of every chain on the wire from a host that did nothing, so there is always something
+to anchor on.
+
+**Not a finding: an anchor naming a chain with no records in the input.** The shipper unlinks a
+generation once the collector has acknowledged every byte in it, so a fully drained chain is absent
+from the spool for entirely ordinary reasons and looks exactly like one deleted wholesale. Those
+anchors are counted and the ambiguity is named; they do not change the exit status.
+
+**An unknown option is now a usage error.** It used to be dropped: `--anchors` was filtered out as
+an option and its operand read as a second spool, so the anchored check silently did not happen. A
+truncation check that quietly does not run is worse than one that was never asked for.
