@@ -95,6 +95,23 @@ export interface AgentRunOptions {
   readonly permissionMode?: string
   /** Milliseconds before the agent process is killed. */
   readonly timeoutMs?: number
+  /**
+   * Prepare the filesystem the run will use, after the profile is materialised
+   * and before the agent is launched.
+   *
+   * The returned function runs once the agent has exited and before the
+   * throwaway home is removed, so a test that changed a filesystem attribute
+   * can put it back — a file left append-only makes the cleanup fail.
+   */
+  readonly prepareRun?: (paths: RunPaths) => () => void
+}
+
+/** Paths a run will use, handed to {@link AgentRunOptions.prepareRun}. */
+export interface RunPaths {
+  /** The throwaway `$DSH_HOME`. */
+  readonly home: string
+  /** Where the bundle patch's default puts the SOC spool. Its directory does not exist yet. */
+  readonly spoolPath: string
 }
 
 /** Everything one end-to-end run produced. */
@@ -267,6 +284,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   // isolates it without the test overriding the row.
   const spoolPath = join(home, 'ocsf', 'session.ocsf.jsonl')
   let server: MockLlmServer | undefined
+  let restore: (() => void) | undefined
 
   try {
     mkdirSync(installDir, { recursive: true })
@@ -299,6 +317,8 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       options.extraProfilePatch ?? '',
       '',
     ].join('\n'))
+
+    restore = options.prepareRun?.({ home, spoolPath })
 
     server = await startMockLlmServer({
       sequence: options.sequence,
@@ -354,6 +374,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       modelRequests: [...server.requests],
     }
   } finally {
+    restore?.()
     await server?.close()
     rmSync(home, { recursive: true, force: true })
   }

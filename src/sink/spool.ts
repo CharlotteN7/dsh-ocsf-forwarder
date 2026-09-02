@@ -144,6 +144,11 @@ function describe(error: unknown): string {
   return code === undefined ? String(error) : code
 }
 
+/** One file mode as an operator writes it: four octal digits behind a leading zero. */
+function octal(mode: number): string {
+  return `0${mode.toString(8).padStart(4, '0')}`
+}
+
 /** Size of one file, or zero when it has been removed under us. */
 function sizeOf(path: string): number {
   try {
@@ -242,6 +247,8 @@ export class SpoolSink implements Sink {
   private failureWarned = false
   /** Holds the rotation-failure warning to one message per outage. */
   private rotationFailureWarned = false
+  /** Holds the un-enforced-mode warning to one message per process. */
+  private modeWarned = false
   /** Earliest time a failed spool tries to open a descriptor again. */
   private nextReopenAt = 0
   /** Current reopen delay, zero until an immediate retry has failed. */
@@ -329,13 +336,57 @@ export class SpoolSink implements Sink {
     this.releaseLock()
   }
 
-  /** Open the live path in append mode and force the configured permissions onto it. */
+  /**
+   * Open the live path in append mode and put the configured permissions on it.
+   *
+   * `open(…, 'a', mode)` applies the mode only when it creates the file, so an
+   * existing spool would otherwise keep whatever permissions it was left with.
+   * The re-assertion is best effort, because the appends are worth more than
+   * it is. `EPERM` is what a spool hardened with `chattr +a` returns for
+   * `fchmod`, and what a spool owned by another account returns; both still
+   * take appends. A spool this process cannot chmod but can write to is a
+   * working spool, and
+   * failing every write because the mode could not be re-stated would hand an
+   * attacker the outage that making the file append-only was meant to prevent.
+   * Any other `errno` is an open this spool has no business keeping, so the
+   * descriptor is closed rather than leaked past the throw.
+   * @returns the open descriptor.
+   */
   private open(): number {
     const fd = openSync(this.options.path, 'a', this.options.mode)
-    // `open(…, 'a', mode)` only applies the mode when it creates the file, so
-    // an existing spool would keep whatever permissions it was left with.
-    fchmodSync(fd, this.options.mode)
+    try {
+      fchmodSync(fd, this.options.mode)
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') {
+        closeSync(fd)
+        throw error
+      }
+      this.warnUnenforcedMode(fd)
+    }
     return fd
+  }
+
+  /**
+   * Report a spool whose mode could not be re-asserted and which grants more
+   * than the configured mode does.
+   *
+   * A file already at or inside the configured mode is what the `fchmod` would
+   * have produced, so there is nothing for an operator to act on and nothing to
+   * say. Wider bits are the SOC lane readable by accounts it was configured to
+   * exclude, which is a finding — named once per process, because the condition
+   * repeats on every reopen and every rotation.
+   * @param fd - the descriptor whose file's actual mode is read.
+   */
+  private warnUnenforcedMode(fd: number): void {
+    if (this.modeWarned) return
+    const actual = fstatSync(fd).mode & 0o7777
+    if ((actual & ~this.options.mode) === 0) return
+    this.modeWarned = true
+    this.options.onWarn?.(
+      `spool ${this.options.path} is mode ${octal(actual)} and could not be changed to `
+      + `${octal(this.options.mode)} (EPERM); an append-only or foreign-owned spool cannot be `
+      + 'chmod-ed, so records keep appending at the wider mode',
+    )
   }
 
   /**

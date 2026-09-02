@@ -32,7 +32,7 @@ export default defineConfig({
         // each metric. A new source file meets this until it is listed below.
         lines: 100,
         functions: 95.45,
-        branches: 93.87,
+        branches: 94.54,
         statements: 98.43,
 
         'src/config.ts': { lines: 100, functions: 100, branches: 97.95, statements: 100 },
@@ -57,7 +57,7 @@ export default defineConfig({
         'src/sink/otlp.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/sink/shipper.ts': { lines: 100, functions: 95.45, branches: 95.45, statements: 98.43 },
         'src/sink/splunk.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
-        'src/sink/spool.ts': { lines: 100, functions: 100, branches: 93.87, statements: 99.31 },
+        'src/sink/spool.ts': { lines: 100, functions: 100, branches: 94.54, statements: 99.37 },
         'src/sink/transport.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
       },
     },
