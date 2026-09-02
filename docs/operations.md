@@ -178,7 +178,9 @@ exists is taken over.
 
 **The modes 0640 and 0600 cover the spool files and nothing else.** They are forced onto the spool,
 the restricted lane and the quarantine file after opening, so a permissive `umask` cannot widen
-them. Everything around them **is** umask-governed:
+them — best effort on the spool itself, because a file made append-only with `chattr +a` refuses
+the `chmod` and keeping the appends is worth more than re-stating the mode. See
+[Hardening the spool](hardening.md), which also covers what `+a` does to rotation. Everything around them **is** umask-governed:
 
 - the **parent directories**, created with `mkdir -p` semantics: under `umask 000` they are 0777;
 - **`<spoolPath>.lock`**, created 0666 under the same umask — and its content is the holding pid,

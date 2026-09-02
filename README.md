@@ -119,6 +119,13 @@ means the chain does not resist the agent it observes.
 
 [The canonicalisation, the threat model, and the cost →](https://charlotten7.github.io/dsh-ocsf-forwarder/integrity.html)
 
+On Linux the complementary move is `chattr +a` on the spool, which makes truncation and rewriting
+fail rather than merely detectable. The plugin tolerates the `chmod` that attribute refuses — but
+it also refuses the rename, so **rotation stops permanently** and the file's size becomes a manual
+job. Harden the live spool file only; hardening its directory breaks the mount.
+
+[What `chattr +a` buys, costs, and breaks →](https://charlotten7.github.io/dsh-ocsf-forwarder/hardening.html)
+
 ## Running it with `dsh-netguard`
 
 Both packages emit OCSF into one index and share the `correlation_uid` scheme

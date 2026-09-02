@@ -963,3 +963,54 @@ from its `latest` dist-tag, still `0.1.0-rc.6` for every `@deepseek-ai/dsh-*` pa
 the development graph became two versions of one harness and `pnpm peers check` reported ten unmet
 peers where it had reported none. They are pinned in `pnpm-workspace.yaml` `overrides` rather than
 added as devDependencies, because nothing here imports any of them.
+
+---
+
+## 46. An append-only spool keeps its appends and loses its rotation
+
+**Context.** `chattr +a` is the standard Linux hardening for an audit file: writes at the end
+succeed, `ftruncate` and any `open` without `O_APPEND` return `EPERM`, and clearing the attribute
+needs `CAP_LINUX_IMMUTABLE`. §44 made a truncated spool *detectable* against shipped records; this
+makes it *hard*. The spool blocked it: `open(…, 'a', mode)` applies the mode only when it creates
+the file, so an existing spool is re-stated with `fchmod`, and on an append-only file that call
+returns `EPERM` and took the whole plugin down with it. Verified against `dsh@0.1.1-rc.2`: the
+constructor threw, the plugin tree failed to load, and `dsh` exited non-zero before the agent
+started. Not a degraded audit lane — no agent at all.
+
+**Decision.** Tolerate `EPERM` from that `fchmod` and keep the descriptor. A spool this process
+cannot chmod but can append to is a working spool; failing every write because the mode could not
+be *re-asserted* hands an attacker the outage that hardening the file was meant to prevent. Every
+other errno stays fatal, and the descriptor is closed before the throw rather than leaked — the
+old code leaked one per refused open, which on the reopen path is one per record while a spool is
+failing.
+
+**Why the re-assertion still exists.** Without it an existing spool keeps whatever permissions it
+was left with, which is exactly the case a fresh `open` cannot fix. Dropping the call would trade a
+loud, rare failure for a silent, permanent one.
+
+**Silence is conditional.** The tolerated `EPERM` warns only when the file grants bits the
+configured mode does not. A file already at or inside the configured mode is what the `fchmod`
+would have produced, so there is nothing for an operator to act on; wider bits are the SOC lane
+readable by accounts the configuration meant to exclude, and no code here can fix that.
+
+**Rotation is not made to work, because it cannot be.** `rename` on an append-only file is `EPERM`
+too, so the live file can never become a generation. That failure already had correct handling —
+report once, reopen the live file immediately, stand off a minute, report `rotation_stopped` — so
+an append-only spool degrades into a permanently un-rotating one that drops nothing and says so.
+Adding a config key to *express* that would be a second way to state what the filesystem already
+says, and a rotation-disabled mode would still not reclaim the disk. The trade is documented
+instead: append-only means unbounded growth and a privileged manual reclaim with the agent stopped.
+
+**The directory attribute is a trap, and is documented as one.** `chattr +a` on the spool's
+directory permits create, append, `chmod` *and truncate* on the files inside — so it buys nothing
+against truncation — while refusing `unlink` and `rename`. That breaks rotation, breaks the
+shipper's removal of a drained generation (which then blocks delivery of everything behind it), and
+breaks `acquireLock`'s takeover of a lock left by a dead process, so one crash makes the plugin
+unmountable. Every row of both tables in `docs/hardening.md` was executed against a real ext4 file
+rather than reasoned about.
+
+**What is proven and what is argued.** The unit and end-to-end tests set the real attribute where
+this process can take `CAP_LINUX_IMMUTABLE` and skip where it cannot; an injected `EPERM` at the
+`fchmodSync` seam covers the handling unconditionally, and the test file says which is which. The
+skip is honest rather than silent: on a runner without the capability the append-only claims in
+this repository are covered by the injected half only.

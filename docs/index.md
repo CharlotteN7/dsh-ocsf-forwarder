@@ -26,6 +26,9 @@ nav_order: 1
   already holds, so is a spool cut short at the end. Ships `dsh-ocsf-verify` to check both. See
   [Tamper-evidence](integrity.md), which also states plainly what the chain does **not** protect
   against.
+- Tolerates a spool the operator made append-only with `chattr +a`, so the standard Linux
+  hardening against truncation does not take the audit sink down with it. What that buys, and what
+  it costs — rotation stops for good — is in [Hardening the spool](hardening.md).
 - Replays a resumed or forked session's constructor seed, which never reaches the live firehose.
 - Keeps raw values out of the SOC lane: keyed digests, value classifications, and lengths instead.
   File paths, tool names, executable names, durable identifiers, the names a model gives its own
