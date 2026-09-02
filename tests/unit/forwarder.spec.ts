@@ -34,6 +34,34 @@ class FakeSession implements ForwardableSession {
   }
 }
 
+/**
+ * A session shaped the way `@deepseek-ai/dsh-session@0.1.2-alpha.4` shapes one:
+ * the log reached through `snapshotEvents()`, and the fork-inherited prefix
+ * length on the session rather than in the header.
+ */
+class SnapshotSession implements ForwardableSession {
+  private readonly log: MappableEvent[] = []
+
+  constructor(
+    readonly id: string,
+    readonly firstLiveSeq: number,
+    readonly inheritedEventCount: number,
+    readonly header: ForwardableSession['header'] = {},
+  ) {}
+
+  get seq(): number { return this.log.length }
+
+  /** A frozen copy of the whole log, which is what the method returns with no arguments. */
+  snapshotEvents(): readonly MappableEvent[] { return Object.freeze([...this.log]) }
+
+  /** Append an event the way `Session.append` would, and return it. */
+  append(type: string, data: unknown, time = 1_000 + this.log.length): MappableEvent {
+    const event = { type, seq: this.log.length, time, data }
+    this.log.push(event)
+    return event
+  }
+}
+
 function forwarder(config: ResolvedConfig = testConfig()): { instance: Forwarder; sink: MemorySink; errors: unknown[] } {
   const sink = new MemorySink()
   const errors: unknown[] = []
@@ -240,6 +268,50 @@ describe('seed replay', () => {
     expect(attributes['seed_length']).toBe(2)
     expect(attributes['agent_preset']).toBe('review')
     expect(attributes['cwd']).toBe('/srv/app')
+  })
+})
+
+
+describe('the two spellings of the session log', () => {
+  it('walks the log through snapshotEvents() when that is what the session offers', () => {
+    const { instance, sink } = forwarder()
+    const session = new SnapshotSession('s1', 0, 0)
+    instance.adopt(session)
+    for (const type of ['turn/start', 'step/start', 'step/end', 'turn/end']) {
+      instance.observe(session, session.append(type, { turn: 1, step: 0, reason: { kind: 'completed' } }))
+    }
+    expect(types(sink)).toEqual(['turn/start', 'step/start', 'step/end', 'turn/end'])
+  })
+
+  it('catches up from index zero, so a seed reached that way is still replayed', () => {
+    const { instance, sink } = forwarder()
+    const session = new SnapshotSession('s2', 4, 3, { parentSession: 'parent-1' })
+    session.append('turn/start', { turn: 1 })
+    session.append('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'bash', arguments: '{"command":"id"}' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('session/end-seed', {})
+    instance.adopt(session)
+    instance.observe(session, session.append('turn/start', { turn: 2 }))
+
+    expect(types(sink)).toEqual(['turn/start', 'tool/call', 'turn/end', 'turn/start'])
+  })
+
+  it('reads seed_length from inheritedEventCount when the header no longer carries it', () => {
+    const { instance, sink } = forwarder()
+    const session = new SnapshotSession('child', 0, 2, { parentSession: 'parent-1', agentPreset: 'review' })
+    instance.observe(session, session.append('turn/start', { turn: 1 }))
+    const attributes = dshOf(sink.records[0] as OcsfRecord)
+    expect(attributes['seed_length']).toBe(2)
+    expect(attributes['parent_session_id']).toBe('parent-1')
+  })
+
+  it('reports a session offering neither spelling instead of quietly forwarding nothing', () => {
+    const { instance, sink, errors } = forwarder()
+    const session: ForwardableSession = { id: 's1', firstLiveSeq: 0, seq: 1, header: {} }
+    instance.observe(session, { type: 'turn/start', seq: 0, time: 1_000, data: { turn: 1 } })
+    expect(sink.records).toEqual([])
+    expect(instance.stats().failed).toBe(1)
+    expect(String(errors[0])).toContain('neither events nor snapshotEvents()')
   })
 })
 

@@ -57,6 +57,8 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
   argumentKey: 'SENTINEL-notasecret-argument-key',
   toolErrorName: 'SENTINEL-notasecret-tool-error-name',
   hookMatcher: 'SENTINEL-notasecret-hook-matcher',
+  teamMessage: 'SENTINEL-teammsg-share-key-AKIA7777EXAMPLE',
+  teamTask: 'SENTINEL-teamtask-rotate-the-vault-secret',
 })
 
 /**
@@ -276,6 +278,11 @@ function events(): MappableEvent[] {
     // must read the payload's shape and never its content.
     { type: 'someone-elses-plugin/event', seq: 39, time: 1_039, data: { turn: 1, note: SENTINELS['prompt'] } },
     { type: 'compaction/end', seq: 40, time: 1_040, data: { compactionId: 'k1', turn: 1, error: SENTINELS['compactionError'] } },
+    // The `team/*` types the vocabulary gained in 0.1.0-rc.8. No installed
+    // package declares their payload, so they take the same generic fallback,
+    // and agent-to-agent text is exactly the content it must not read.
+    { type: 'team/message/queued', seq: 41, time: 1_041, data: { to: 'member-2', text: SENTINELS['teamMessage'] } },
+    { type: 'team/task', seq: 42, time: 1_042, data: { id: 't1', objective: SENTINELS['teamTask'] } },
   ]
 }
 

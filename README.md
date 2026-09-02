@@ -6,7 +6,7 @@ profile, and writes newline-delimited OCSF JSON to a local append-only spool —
 it to **Splunk HTTP Event Collector** or an **OTLP/HTTP** collector.
 
 📖 **[Full documentation](https://charlotten7.github.io/dsh-ocsf-forwarder/)** — including the
-complete event → OCSF mapping table for all 44 session event types.
+complete event → OCSF mapping table for all 48 session event types.
 
 ## What it does
 
@@ -49,14 +49,17 @@ The profile must already compose a runnable agent — a profile carrying only
 `@deepseek-ai/dsh-base` has no agent loop and this plugin would observe nothing:
 
 ```sh
-dsh plugin --profile <name> add @deepseek-ai/dsh-headless@0.1.0-rc.6
+dsh plugin --profile <name> add @deepseek-ai/dsh-headless@0.1.1-rc.2
 dsh plugin --profile <name> add dsh-ocsf-forwarder
 dsh --profile <name> --dump-config      # verify the row is mounted
 ```
 
-Pin `@deepseek-ai/dsh-headless` explicitly — its npm `latest` tag still points at `0.0.1-rc.1`.
-Install from the registry or a packed tarball, **not** from a git spec: `lib/` is a build output
-git does not carry.
+Pin `@deepseek-ai/dsh-headless` explicitly — the `@deepseek-ai/dsh-*` libraries' npm `latest` tag
+still points at `0.0.1-rc.1`. Install from the registry or a packed tarball, **not** from a git
+spec: `lib/` is a build output git does not carry.
+
+Runs on dsh `0.1.0-rc.6` through `0.1.2-alpha.5`; CI runs the end-to-end suite against every line
+in that range.
 
 [Install in full →](https://charlotten7.github.io/dsh-ocsf-forwarder/install.html)
 

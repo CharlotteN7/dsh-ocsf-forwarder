@@ -88,8 +88,10 @@ object does not define and class 1007 defines at the top level of the record.
 
 ## Event mapping
 
-All 44 session event types this build knows (`packages/core/session/src/known-event-types.ts` in
-the harness, catalogued in its `docs/persistence-catalog.md`).
+All 48 session event types this build knows (`packages/core/session/src/known-event-types.ts` in
+the harness, catalogued in its `docs/persistence-catalog.md`). The count is the vocabulary of the
+newest `@deepseek-ai/dsh-session` the peer range admits, which is what `tests/unit/mapping-doc.spec.ts`
+reads it from; an older harness knows a prefix of it.
 `type_uid = class_uid * 100 + activity_id`.
 
 Tool events are classified by tool name first — see [Tool classification](#tool-classification) —
@@ -128,19 +130,23 @@ which is why they list several classes.
 | 29 | `step/start` | API Activity (6003) | 2 Read | Opens one model call plus its tool executions; `status_id: 0`. |
 | 30 | `step/end` | API Activity (6003) | 2 Read | `status_id: 1`, `duration` from the paired `step/start`. |
 | 31 | `subagent/descriptor` | Application Lifecycle (6002) | 3 Start | This session **is** the child. `mode` and `provider` only: the payload names no session id, so no `delegation` is invented. |
-| 32 | `todo/write` | — | — | **Dropped by default**: UI state made of user and model task text. Re-enabled, it takes the generic fallback below — metadata only, and **not** an item count. |
-| 33 | `tool/call` | by tool name: 1007 / 1001 / 4002 / 6003 | by tool name | `status_id: 0` (in flight). `metadata.correlation_uid = <session>:<callId>`. |
-| 34 | `tool/result` | by tool name (same class as its call) | by tool name | `status_id` from `content[0].isError`; `start_time`/`end_time`/`duration` from the correlated call. |
-| 35 | `tool/code-dispatch-start` | by inner tool name | by tool name | Sub-call inside `run_code`; `unmapped.dsh.parent_call_id`. |
-| 36 | `tool/code-dispatch` | by inner tool name | by tool name | Sub-call settlement; `status_id` from `isError`. |
-| 37 | `tool-workflow/run-start` | Application Lifecycle (6002) | 3 Start | |
-| 38 | `tool-workflow/run-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `stopReason`. |
-| 39 | `tool-workflow/agent-start` | Application Lifecycle (6002) | 3 Start | Member agent. The one event that names a child: `delegation = { uid: childId, parent_uid: <this session> }`. |
-| 40 | `tool-workflow/agent-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `outcome`. |
-| 41 | `turn/start` | API Activity (6003) | 1 Create | The unit of agent work; `status_id: 0`. |
-| 42 | `turn/end` | API Activity (6003) | 1 Create | **`TurnEndReason` is the outcome discriminant**; `duration` from the paired `turn/start`. A provider failure contributes its `code` and a digest of its message. |
-| 43 | `user/message` | API Activity (6003) | 1 Create | `message_context.ai_role_id: 1`; `unmapped.dsh.message_source` distinguishes a human prompt from an injected context. Text digested in the SOC lane. |
-| 44 | `web/deepseek-search-llm-request` | API Activity (6003) | 2 Read | Auxiliary search request: `api.service.name = 'deepseek-search'`, `api.version` = `apiVersion`, and `ai_model` = the search provider's own model, which is not the session route. The query text is digested. |
+| 32 | `team/member` | API Activity (6003) | 99 Other | **Generic fallback**, and deliberately: added in `0.1.0-rc.8`, and the payload interface is declaration-merged by a harness package this plugin does not install, so `@deepseek-ai/dsh-session` lists the type and declares no shape for it. There is nothing to read by name and nothing is read. |
+| 33 | `team/message/delivered` | API Activity (6003) | 99 Other | **Generic fallback**, as above. |
+| 34 | `team/message/queued` | API Activity (6003) | 99 Other | **Generic fallback**, as above. A queued message is agent-to-agent text; the fallback carries none of it. |
+| 35 | `team/task` | API Activity (6003) | 99 Other | **Generic fallback**, as above. |
+| 36 | `todo/write` | — | — | **Dropped by default**: UI state made of user and model task text. Re-enabled, it takes the generic fallback below — metadata only, and **not** an item count. |
+| 37 | `tool/call` | by tool name: 1007 / 1001 / 4002 / 6003 | by tool name | `status_id: 0` (in flight). `metadata.correlation_uid = <session>:<callId>`. |
+| 38 | `tool/result` | by tool name (same class as its call) | by tool name | `status_id` from `content[0].isError`; `start_time`/`end_time`/`duration` from the correlated call. |
+| 39 | `tool/code-dispatch-start` | by inner tool name | by tool name | Sub-call inside `run_code`; `unmapped.dsh.parent_call_id`. |
+| 40 | `tool/code-dispatch` | by inner tool name | by tool name | Sub-call settlement; `status_id` from `isError`. |
+| 41 | `tool-workflow/run-start` | Application Lifecycle (6002) | 3 Start | |
+| 42 | `tool-workflow/run-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `stopReason`. |
+| 43 | `tool-workflow/agent-start` | Application Lifecycle (6002) | 3 Start | Member agent. The one event that names a child: `delegation = { uid: childId, parent_uid: <this session> }`. |
+| 44 | `tool-workflow/agent-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `outcome`. |
+| 45 | `turn/start` | API Activity (6003) | 1 Create | The unit of agent work; `status_id: 0`. |
+| 46 | `turn/end` | API Activity (6003) | 1 Create | **`TurnEndReason` is the outcome discriminant**; `duration` from the paired `turn/start`. A provider failure contributes its `code` and a digest of its message. |
+| 47 | `user/message` | API Activity (6003) | 1 Create | `message_context.ai_role_id: 1`; `unmapped.dsh.message_source` distinguishes a human prompt from an injected context. Text digested in the SOC lane. |
+| 48 | `web/deepseek-search-llm-request` | API Activity (6003) | 2 Read | Auxiliary search request: `api.service.name = 'deepseek-search'`, `api.version` = `apiVersion`, and `ai_model` = the search provider's own model, which is not the session route. The query text is digested. |
 
 **The generic fallback** is API Activity 6003 / activity `99 Other`, `api.operation` = the event
 type, and `unmapped.dsh.event` plus whatever `turn` and `step` the payload happened to carry — no

@@ -4,9 +4,10 @@
  *
  * One mechanism covers three problems at once. Every observation catches the
  * spool up from a per-session cursor to the observed event's `seq` by walking
- * `session.events`, which handles the constructor seed (never published), the
- * `session/end-seed` marker (appended before the store attaches, so also never
- * published), and any event appended while this plugin was not yet mounted.
+ * the session's whole log, which handles the constructor seed (never
+ * published), the `session/end-seed` marker (appended before the store
+ * attaches, so also never published), and any event appended while this plugin
+ * was not yet mounted.
  * @module forwarder
  */
 
@@ -20,18 +21,68 @@ import { mapUnresolvedCall } from './map/tool-events.ts'
 import { buildRecord, type EventMapping, type RecordEnvironment, type RecordSubject } from './ocsf/record.ts'
 import type { Sink } from './sink/spool.ts'
 
-/** The parts of a harness `Session` this forwarder reads. */
+/**
+ * The parts of a harness `Session` this forwarder reads.
+ *
+ * Two of them are spelled differently on either side of
+ * `@deepseek-ai/dsh-session@0.1.2-alpha.4`, and the peer range admits versions
+ * from both sides, so both spellings are declared and
+ * {@link logOf} / {@link seedLengthOf} pick the one the resolved version has.
+ */
 export interface ForwardableSession {
   readonly id: string
   readonly firstLiveSeq: number
   readonly seq: number
-  readonly events: readonly MappableEvent[]
+  /** The whole log, up to `0.1.1`. Replaced by {@link ForwardableSession.snapshotEvents}. */
+  readonly events?: readonly MappableEvent[]
+  /**
+   * The whole log, from `0.1.2-alpha.4`. Called with no arguments it defaults
+   * to the log's first entry through its current end, which is what the
+   * accessor it replaced returned.
+   */
+  readonly snapshotEvents?: () => readonly MappableEvent[]
+  /** The fork-inherited prefix length, from `0.1.2-alpha.4`. */
+  readonly inheritedEventCount?: number
   readonly header: {
     readonly parentSession?: string
+    /** The fork-inherited prefix length, up to `0.1.1`. */
     readonly seedLength?: number
     readonly agentPreset?: string
     readonly cwd?: string
   }
+}
+
+/**
+ * One session's whole event log.
+ *
+ * `Session.events` became `Session.snapshotEvents()` in
+ * `@deepseek-ai/dsh-session@0.1.2-alpha.4`. Called with no arguments the method
+ * returns the same cached frozen array of the log from index zero that the
+ * accessor did, so this is a choice between two published spellings of one
+ * capability rather than a reconstruction of a capability that went away.
+ * @param session - the session whose log is being read.
+ * @returns every event the session holds, in log order.
+ */
+function logOf(session: ForwardableSession): readonly MappableEvent[] {
+  if (session.snapshotEvents !== undefined) return session.snapshotEvents()
+  if (session.events !== undefined) return session.events
+  throw new Error(
+    'session exposes neither events nor snapshotEvents(); the resolved '
+    + '@deepseek-ai/dsh-session is outside the range this plugin declares',
+  )
+}
+
+/**
+ * The fork-inherited prefix length a record reports as `seed_length`.
+ *
+ * `header.seedLength` moved to `Session.inheritedEventCount` in
+ * `@deepseek-ai/dsh-session@0.1.2-alpha.4`, where the header field is not
+ * merely absent but rejected on write.
+ * @param session - the session being described.
+ * @returns the prefix length, or `undefined` when the session inherited none.
+ */
+function seedLengthOf(session: ForwardableSession): number | undefined {
+  return session.header.seedLength ?? session.inheritedEventCount
 }
 
 /** Counters an operator can read to tell a quiet forwarder from a broken one. */
@@ -192,8 +243,8 @@ export class Forwarder {
    * @param throughSeq - the last `seq` to forward in this pass.
    */
   private catchUp(session: ForwardableSession, state: SessionState, throughSeq: number): void {
-    // Read once: the accessor materialises a frozen copy of the whole log.
-    const events = session.events
+    // Read once: materialising the log is a frozen copy of the whole of it.
+    const events = logOf(session)
     while (state.index < events.length) {
       const pending = events[state.index]
       if (pending === undefined || pending.seq > throughSeq) return
@@ -244,11 +295,12 @@ export class Forwarder {
     mapping: EventMapping,
     payload: unknown,
   ): void {
+    const seedLength = seedLengthOf(session)
     const base: RecordSubject = {
       sessionId: session.id,
       ...subject,
       ...session.header.parentSession === undefined ? {} : { parentSessionId: session.header.parentSession },
-      ...session.header.seedLength === undefined ? {} : { seedLength: session.header.seedLength },
+      ...seedLength === undefined ? {} : { seedLength },
       ...session.header.agentPreset === undefined ? {} : { agentPreset: session.header.agentPreset },
       ...session.header.cwd === undefined ? {} : { cwd: session.header.cwd },
       ...state.aiModel === undefined ? {} : { aiModel: state.aiModel },

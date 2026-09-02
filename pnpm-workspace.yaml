@@ -1,2 +1,21 @@
 allowBuilds:
   esbuild: true
+
+# The harness packages our devDependencies peer-depend on are not listed here,
+# so pnpm auto-installs them — and resolves each from its `latest` dist-tag,
+# which for every `@deepseek-ai/dsh-*` package still points at `0.1.0-rc.6`
+# while `next` points at the line these devDependencies are on. Left alone the
+# development graph is two versions of one harness, and `pnpm peers check`
+# reports ten unmet peers. Pinned here rather than added as devDependencies
+# because nothing in this package imports any of them.
+overrides:
+  '@deepseek-ai/dsh-agent': 0.1.1-rc.2
+  '@deepseek-ai/dsh-attachment': 0.1.1-rc.2
+  '@deepseek-ai/dsh-brand': 0.1.1-rc.2
+  '@deepseek-ai/dsh-code-runtime': 0.1.1-rc.2
+  '@deepseek-ai/dsh-invariants': 0.1.1-rc.2
+  '@deepseek-ai/dsh-scope': 0.1.1-rc.2
+  '@deepseek-ai/dsh-system-prompt': 0.1.1-rc.2
+  '@deepseek-ai/dsh-timeout': 0.1.1-rc.2
+  '@deepseek-ai/dsh-typert-protocol': 0.1.1-rc.2
+  '@deepseek-ai/dsh-user-approval': 0.1.1-rc.2

@@ -899,3 +899,67 @@ anchors are counted and the ambiguity is named; they do not change the exit stat
 **An unknown option is now a usage error.** It used to be dropped: `--anchors` was filtered out as
 an option and its operand read as a second spool, so the anchored check silently did not happen. A
 truncation check that quietly does not run is worse than one that was never asked for.
+
+## 45. `Session.events` became `snapshotEvents()`, and the peer ranges never admitted a prerelease
+
+Four separate findings, one dependency pass. §33 widened the DSH peers to `^0.1.0-rc.6` believing
+that "admits every prerelease of `0.1.0` from rc.6 up". It does — and nothing else. Checked with
+the repository's own `semver@7.8.5`:
+
+| version | `^0.1.0-rc.6` | `>=0.1.0-rc.6 <0.2.0 \|\| >=0.1.1-rc.0 <0.1.2-0 \|\| >=0.1.2-alpha.0 <0.1.3-0` |
+|---|---|---|
+| `0.1.0-rc.5` | no | no |
+| `0.1.0-rc.6` / `-rc.7` / `-rc.8` | yes | yes |
+| `0.1.1-rc.1` / `-rc.2` | **no** | yes |
+| `0.1.1` | yes | yes |
+| `0.1.2-alpha.2` / `-alpha.5` | **no** | yes |
+| `0.1.2`, `0.1.3` | yes | yes |
+| `0.1.3-rc.1` | no | **no** |
+| `0.2.0-rc.1`, `0.2.0`, `1.0.0` | no | no |
+
+node-semver lets a prerelease satisfy a range only when some comparator in the same set carries a
+prerelease tag **and** the identical `major.minor.patch`. `^0.1.0-rc.6` desugars to
+`>=0.1.0-rc.6 <0.2.0-0`, whose only prerelease comparator is on the `0.1.0` tuple — so the version
+the `@deepseek-ai/dsh` CLI's `latest` tag points at, `0.1.1-rc.2`, was outside a range the e2e suite
+had been passing against for weeks. One comparator set per prerelease patch tuple is the only way
+to express this, which is why `0.1.3-rc.1` is not covered: each new prerelease line stays out until
+someone runs the suite against it and adds a set, and that is the point of the enumeration.
+
+**`Session.events` was replaced, not removed.** `Session.snapshotEvents(fromSeq?, toSeqExclusive?)`
+landed in `@deepseek-ai/dsh-session@0.1.2-alpha.4` (`events` is still present in `alpha.2` and
+`alpha.3`). Called with no arguments its implementation returns the same cached frozen array of the
+whole log from index zero that the accessor returned, so the seed replay and the catch-up walk need
+no redesign. `header.seedLength` moved in the same release to `Session.inheritedEventCount`, and
+there it is not merely absent — the header parser throws on a `seedLength` key. `logOf` and
+`seedLengthOf` read whichever spelling the resolved version has. That is not a shim for a capability
+that went away; it is a choice between two published spellings of one that did not, and the peer
+range admits versions on both sides of the change.
+
+The break is not hypothetical and not gradual. Against `dsh@0.1.2-alpha.5` the unported plugin
+mounted, the agent ran, and the spool held no session records at all — `catchUp` read `undefined`
+and threw into the listener's containment once per event. The whole e2e suite passes against
+`0.1.2-alpha.5` with the port.
+
+**cordis went to `^4.0.1`.** §33 kept it at exactly `4.0.1` so that "two copies are two graphs". A
+peer range installs nothing, so an exact pin cannot prevent a second copy — it can only refuse the
+tree, which is what it did: `@deepseek-ai/dsh-session@0.1.2-alpha.5` peers `@deepseek-ai/cordis@^4.0.2`,
+and a project on that line got `ERESOLVE ... peer @deepseek-ai/cordis@"4.0.1" from dsh-ocsf-forwarder`.
+Every file `4.0.2` ships is byte-identical to `4.0.1`; only its own `package.json` moves. `^4.0.1` is
+what DSH's own packages declare, and being stricter than the application that owns the graph buys
+nothing.
+
+**The devDependencies moved to `0.1.1-rc.2`**, so what the types are checked against is the newest
+line the range promises rather than the oldest. Two consequences were handled rather than avoided.
+`KNOWN_SESSION_EVENT_TYPES` went from 44 to 48 and `mapping-doc.spec.ts` named the four missing
+rows; `team/member`, `team/message/delivered`, `team/message/queued` and `team/task` take the
+generic fallback, and the table now says so instead of claiming a coverage it did not have. No
+installed package declares their payloads — `dsh-session` lists the types and the interfaces are
+declaration-merged by a package this plugin does not install — so there is nothing to map by name,
+and two of them are now sentinels in the SOC-lane invariant because a queued team message is
+agent-to-agent text the fallback must not read.
+
+The other consequence: pnpm auto-installs the peers those devDependencies declare and resolves each
+from its `latest` dist-tag, still `0.1.0-rc.6` for every `@deepseek-ai/dsh-*` package. Left alone
+the development graph became two versions of one harness and `pnpm peers check` reported ten unmet
+peers where it had reported none. They are pinned in `pnpm-workspace.yaml` `overrides` rather than
+added as devDependencies, because nothing here imports any of them.
