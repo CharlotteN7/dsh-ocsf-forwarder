@@ -1,8 +1,8 @@
 /** Defensive payload readers: what they return for the shapes a durable log can hold. */
 import { describe, expect, it } from 'vitest'
-import { readArrayLength, readBoolean, readNested, readNumber, readRecord, readString } from '../../src/read.ts'
+import { readArrayLength, readBoolean, readNested, readNumber, readRecord, readString, readStringArray } from '../../src/read.ts'
 
-const payload = { name: 'bash', turn: 2, ok: true, items: [1, 2, 3], nested: { a: 1 }, nil: null }
+const payload = { name: 'bash', turn: 2, ok: true, items: [1, 2, 3], scopes: ['src/**', 7, 'lib/*'], nested: { a: 1 }, nil: null }
 
 describe('readers', () => {
   it('returns the value when the field has the expected type', () => {
@@ -11,6 +11,7 @@ describe('readers', () => {
     expect(readBoolean(payload, 'ok')).toBe(true)
     expect(readArrayLength(payload, 'items')).toBe(3)
     expect(readNested(payload, 'nested')).toEqual({ a: 1 })
+    expect(readStringArray(payload, 'scopes')).toEqual(['src/**', 'lib/*'])
     expect(readRecord(payload)).toBe(payload)
   })
 
@@ -20,6 +21,10 @@ describe('readers', () => {
     expect(readBoolean(payload, 'name')).toBeUndefined()
     expect(readArrayLength(payload, 'name')).toBeUndefined()
     expect(readNested(payload, 'items')).toBeUndefined()
+    expect(readStringArray(payload, 'name')).toBeUndefined()
+    // A non-string member is left out rather than rendered, so the result
+    // never carries a value the log did not spell.
+    expect(readStringArray(payload, 'items')).toEqual([])
     expect(readNumber({ turn: Number.NaN }, 'turn')).toBeUndefined()
   })
 
@@ -31,6 +36,7 @@ describe('readers', () => {
       expect(readBoolean(value, 'ok')).toBeUndefined()
       expect(readArrayLength(value, 'items')).toBeUndefined()
       expect(readNested(value, 'nested')).toBeUndefined()
+      expect(readStringArray(value, 'scopes')).toBeUndefined()
     }
   })
 })

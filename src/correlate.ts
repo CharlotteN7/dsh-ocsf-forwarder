@@ -87,6 +87,14 @@ export class SessionState {
   private readonly compactions = new Map<string, number>()
   private readonly turns = new Map<number, number>()
   private readonly steps = new Map<string, number>()
+  private readonly teamMessages = new Map<string, number>()
+  /**
+   * Highest session-log sequence observed delivered off the host, per delivered
+   * session id. A fork inherits its parent's acceptance markers verbatim, so
+   * one session's log can carry watermarks for more than one session id and
+   * they must not be subtracted from each other.
+   */
+  private readonly deliveredThrough = new Map<string, number>()
 
   /**
    * Record one tool call so its result can be paired.
@@ -206,6 +214,39 @@ export class SessionState {
     const time = this.steps.get(key)
     this.steps.delete(key)
     return time
+  }
+
+  /**
+   * Record one queued team message so its delivery can be paired.
+   * @param messageId - the team message id.
+   * @param time - the `team/message/queued` append time.
+   */
+  openTeamMessage(messageId: string, time: number): void {
+    this.teamMessages.set(messageId, time)
+  }
+
+  /**
+   * Take the queued message one delivery closes.
+   * @param messageId - the delivery's message id.
+   * @returns the queue time, or `undefined` when the queueing was not seen.
+   */
+  closeTeamMessage(messageId: string): number | undefined {
+    const time = this.teamMessages.get(messageId)
+    this.teamMessages.delete(messageId)
+    return time
+  }
+
+  /**
+   * Advance one session id's session-log delivery watermark.
+   * @param deliveredSessionId - the session identity the accepted delivery named.
+   * @param throughSeq - the highest sequence the delivery carried.
+   * @returns the watermark before this delivery, or `undefined` when this
+   *   process observed none — in which case how much left the host is unknown.
+   */
+  advanceDelivery(deliveredSessionId: string, throughSeq: number): number | undefined {
+    const previous = this.deliveredThrough.get(deliveredSessionId)
+    this.deliveredThrough.set(deliveredSessionId, throughSeq)
+    return previous
   }
 
   /**

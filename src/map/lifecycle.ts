@@ -273,6 +273,41 @@ export function mapRequestContext(event: { data: unknown }, state: SessionState)
 }
 
 /**
+ * Map `model/selection`: a validated provider and model committed for the next
+ * request.
+ *
+ * The session route is deliberately left alone. `request/context` records the
+ * route a request actually used; a selection is what the next one should use,
+ * and folding it in here would attribute every record between this event and
+ * the next `request/context` to a model that has served nothing.
+ * @param event - the event's payload.
+ * @returns the record mapping, or `undefined` when either half of the route is
+ *   absent, which is the whole of what the record says.
+ */
+export function mapModelSelection(event: { data: unknown }): EventMapping | undefined {
+  const provider = readString(event.data, 'provider')
+  const model = readString(event.data, 'model')
+  if (provider === undefined || model === undefined) return undefined
+  const effort = readString(event.data, 'reasoningEffort')
+  return {
+    classUid: CLASS.applicationLifecycle,
+    activityId: ACTIVITY.applicationLifecycle.update,
+    // Which endpoint the session's content is sent to is not routine
+    // bookkeeping, and a selection is the point at which it changes.
+    severityId: SEVERITY.low,
+    statusId: STATUS.success,
+    message: `model selection ${provider}/${model}`,
+    aiModel: { name: model, ai_provider: provider },
+    attributes: {
+      provider,
+      model,
+      phase: 'selected',
+      ...effort === undefined ? {} : { reasoning_effort: effort },
+    },
+  }
+}
+
+/**
  * Map `request/header`: the agent's capability set for the next request. Tool
  * *names* and a system-prompt digest are recorded; the prompt text and the
  * tool schemas are not.
@@ -404,8 +439,8 @@ export function mapHookResult(sessionId: string, event: { data: unknown }, confi
  *
  * The descriptor is appended to the child's own log and names no session id;
  * the record's own `session_id` is the child, and `dsh.parent_session_id`
- * carries the lineage. `tool-workflow/agent-start` is where a parent names its
- * children, so that is where {@link mapWorkflow} builds the delegation link.
+ * carries the lineage. A parent names a child by id in `tool-workflow/agent-start`
+ * and in `team/member`, which is where the `delegation` link is built.
  * @param sessionId - the session the event belongs to, which is the child.
  * @param event - the event's payload.
  * @returns the record mapping.

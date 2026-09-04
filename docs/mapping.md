@@ -88,10 +88,12 @@ object does not define and class 1007 defines at the top level of the record.
 
 ## Event mapping
 
-All 48 session event types this build knows (`packages/core/session/src/known-event-types.ts` in
+All 51 session event types this build knows (`packages/core/session/src/known-event-types.ts` in
 the harness, catalogued in its `docs/persistence-catalog.md`). The count is the vocabulary of the
 newest `@deepseek-ai/dsh-session` the peer range admits, which is what `tests/unit/mapping-doc.spec.ts`
-reads it from; an older harness knows a prefix of it.
+reads it from; an older harness knows a prefix of it — `0.1.2-alpha.5` is the first line carrying
+`model/selection`, `session-log-deepseek/delivery-accepted` and `subagent/model-selection-policy`,
+and `0.1.1` knows 48.
 `type_uid = class_uid * 100 + activity_id`.
 
 Tool events are classified by tool name first — see [Tool classification](#tool-classification) —
@@ -118,35 +120,38 @@ which is why they list several classes.
 | 17 | `hook/result` | Process Activity (1007) | 2 Terminate | `status_id` from `decision`, reduced to the protocol's `approve`/`allow`/`block`/`deny`/`ask` with anything else recorded as `other` plus a digest; `exit_code`, which class 1007 defines at the top level and the `process` object does not define at all; `duration` = `durationMs`. |
 | 18 | `llm/retry` | API Activity (6003) | 2 Read | `status_id: 2` (the attempt that failed), `status_detail` = failure code. Provider, retry number, cap, and delay in `unmapped.dsh`; the provider's failure message is digested. Correlates to 19 as `<session>:retry:<retryId>`. |
 | 19 | `llm/retry-started` | API Activity (6003) | 2 Read | `status_id: 0`; the wait completed and the next attempt starts. Paired to 18 on `retryId`. |
-| 20 | `permission/preset` | Authorize Session (3003) | 1 Assign Privileges | `privileges: [preset:<name>]`. |
-| 21 | `plan/mode` | API Activity (6003) | 3 Update | Plan mode on/off, in `unmapped.dsh.plan_mode_active`. |
-| 22 | `request/context` | Application Lifecycle (6002) | 8 Update | Provider/model route change. Folds into `ai_model` for every later record in the session. |
-| 23 | `request/header` | Application Lifecycle (6002) | 8 Update | **Capability-set change.** Tool *names* and count, model config, and a digest of the system prompt. Never the prompt text or tool schemas in the SOC lane. |
-| 24 | `sandbox/mode` | Authorize Session (3003) | 1 Assign Privileges | Confinement change; `privileges: [sandbox:<mode>]`. High value. |
-| 25 | `schedule/change` | Scheduled Job Activity (1006) | 1 Create / 2 Update / 3 Delete / 99 Other | From `operation` (`create` / `dispatch` / `delete`); `job: { name, uid }` from `schedule.id` on a create, `id` otherwise. |
-| 26 | `session/end-seed` | — | — | **Dropped.** Internal construction marker; its meaning is carried by the seed-replay boundary record. Re-enabled, it takes the generic fallback below. |
-| 27 | `session/title` | — | — | **Dropped by default**: a model-written summary of the user's prompt — user content by another name. Re-enabled, it takes the generic fallback below. |
-| 28 | `session/title-llm-request` | — | — | **Dropped by default**: carries prompt text. Re-enabled, it takes the generic fallback below. |
-| 29 | `step/start` | API Activity (6003) | 2 Read | Opens one model call plus its tool executions; `status_id: 0`. |
-| 30 | `step/end` | API Activity (6003) | 2 Read | `status_id: 1`, `duration` from the paired `step/start`. |
-| 31 | `subagent/descriptor` | Application Lifecycle (6002) | 3 Start | This session **is** the child. `mode` and `provider` only: the payload names no session id, so no `delegation` is invented. |
-| 32 | `team/member` | API Activity (6003) | 99 Other | **Generic fallback**, and deliberately: added in `0.1.0-rc.8`, and the payload interface is declaration-merged by a harness package this plugin does not install, so `@deepseek-ai/dsh-session` lists the type and declares no shape for it. There is nothing to read by name and nothing is read. |
-| 33 | `team/message/delivered` | API Activity (6003) | 99 Other | **Generic fallback**, as above. |
-| 34 | `team/message/queued` | API Activity (6003) | 99 Other | **Generic fallback**, as above. A queued message is agent-to-agent text; the fallback carries none of it. |
-| 35 | `team/task` | API Activity (6003) | 99 Other | **Generic fallback**, as above. |
-| 36 | `todo/write` | — | — | **Dropped by default**: UI state made of user and model task text. Re-enabled, it takes the generic fallback below — metadata only, and **not** an item count. |
-| 37 | `tool/call` | by tool name: 1007 / 1001 / 4002 / 6003 | by tool name | `status_id: 0` (in flight). `metadata.correlation_uid = <session>:<callId>`. |
-| 38 | `tool/result` | by tool name (same class as its call) | by tool name | `status_id` from `content[0].isError`; `start_time`/`end_time`/`duration` from the correlated call. |
-| 39 | `tool/code-dispatch-start` | by inner tool name | by tool name | Sub-call inside `run_code`; `unmapped.dsh.parent_call_id`. |
-| 40 | `tool/code-dispatch` | by inner tool name | by tool name | Sub-call settlement; `status_id` from `isError`. |
-| 41 | `tool-workflow/run-start` | Application Lifecycle (6002) | 3 Start | |
-| 42 | `tool-workflow/run-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `stopReason`. |
-| 43 | `tool-workflow/agent-start` | Application Lifecycle (6002) | 3 Start | Member agent. The one event that names a child: `delegation = { uid: childId, parent_uid: <this session> }`. |
-| 44 | `tool-workflow/agent-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `outcome`. |
-| 45 | `turn/start` | API Activity (6003) | 1 Create | The unit of agent work; `status_id: 0`. |
-| 46 | `turn/end` | API Activity (6003) | 1 Create | **`TurnEndReason` is the outcome discriminant**; `duration` from the paired `turn/start`. A provider failure contributes its `code` and a digest of its message. |
-| 47 | `user/message` | API Activity (6003) | 1 Create | `message_context.ai_role_id: 1`; `unmapped.dsh.message_source` distinguishes a human prompt from an injected context. Text digested in the SOC lane. |
-| 48 | `web/deepseek-search-llm-request` | API Activity (6003) | 2 Read | Auxiliary search request: `api.service.name = 'deepseek-search'`, `api.version` = `apiVersion`, and `ai_model` = the search provider's own model, which is not the session route. The query text is digested. |
+| 20 | `model/selection` | Application Lifecycle (6002) | 8 Update | **The validated provider and model committed for the next request**, with `ai_model` on the record. It does *not* move the session route: `request/context` records what a request actually used, and folding a selection in would attribute the records between the two to a model that has served nothing. |
+| 21 | `permission/preset` | Authorize Session (3003) | 1 Assign Privileges | `privileges: [preset:<name>]`. |
+| 22 | `plan/mode` | API Activity (6003) | 3 Update | Plan mode on/off, in `unmapped.dsh.plan_mode_active`. |
+| 23 | `request/context` | Application Lifecycle (6002) | 8 Update | Provider/model route change. Folds into `ai_model` for every later record in the session. |
+| 24 | `request/header` | Application Lifecycle (6002) | 8 Update | **Capability-set change.** Tool *names* and count, model config, and a digest of the system prompt. Never the prompt text or tool schemas in the SOC lane. |
+| 25 | `sandbox/mode` | Authorize Session (3003) | 1 Assign Privileges | Confinement change; `privileges: [sandbox:<mode>]`. High value. |
+| 26 | `schedule/change` | Scheduled Job Activity (1006) | 1 Create / 2 Update / 3 Delete / 99 Other | From `operation` (`create` / `dispatch` / `delete`); `job: { name, uid }` from `schedule.id` on a create, `id` otherwise. |
+| 27 | `session-log-deepseek/delivery-accepted` | API Activity (6003) | 1 Create | **The session log itself left the host.** `@deepseek-ai/dsh-session-log-deepseek` uploads every canonical event since the last watermark with a model request; this event records the endpoint accepting it. `api.service.name = 'deepseek-llm-api'`, plus `delivered_through_seq`, and `delivered_after_seq` / `delivered_event_count` once a preceding watermark has been observed — `first_observed_delivery` when none has. A marker naming another session was inherited through a fork seed and is graded `severity_id: 1`, because nothing left on this session's account. |
+| 28 | `session/end-seed` | — | — | **Dropped.** Internal construction marker; its meaning is carried by the seed-replay boundary record. Re-enabled, it takes the generic fallback below. |
+| 29 | `session/title` | — | — | **Dropped by default**: a model-written summary of the user's prompt — user content by another name. Re-enabled, it takes the generic fallback below. |
+| 30 | `session/title-llm-request` | — | — | **Dropped by default**: carries prompt text. Re-enabled, it takes the generic fallback below. |
+| 31 | `step/start` | API Activity (6003) | 2 Read | Opens one model call plus its tool executions; `status_id: 0`. |
+| 32 | `step/end` | API Activity (6003) | 2 Read | `status_id: 1`, `duration` from the paired `step/start`. |
+| 33 | `subagent/descriptor` | Application Lifecycle (6002) | 3 Start | This session **is** the child. `mode` and `provider` only: the payload names no session id, so no `delegation` is invented. |
+| 34 | `subagent/model-selection-policy` | Authorize Session (3003) | 1 Assign Privileges | **The exact routes this session may hand a child agent**, as `privileges: [subagent-model:<provider>/<model>]`. A policy naming no complete route produces no record: OCSF constrains the class `at_least_one: [privileges, groups, iam_roles]`. |
+| 35 | `team/member` | Application Lifecycle (6002) | 3 Start | **An agent joined this session's team**, and the second event type that names a child session by id: `delegation = { uid: member.id, parent_uid: <this session> }`. Provider, `context` (`fresh`/`fork`) and provisioning phase verbatim; the member's brief is digested. |
+| 36 | `team/message/delivered` | API Activity (6003) | 3 Update | Settles the message on `messageId`; `duration` + `unmapped.dsh.delivery_latency_ms` from the paired queueing. |
+| 37 | `team/message/queued` | API Activity (6003) | 1 Create | **One agent addressed another.** Sender session, target session and `delivery` (`quiet`/`wakeup`, which decides whether the target acts on it now); `message_context.ai_role_id: 4`. The text itself is digested. Correlates to `team/message/delivered` as `<session>:team-message:<id>`. |
+| 38 | `team/task` | API Activity (6003) | 3 Update / 4 Delete | Task snapshot: owner session, revision, status, blocked-by count, and **`write_scopes` verbatim** — a path pattern is the security signal, on the same reasoning as `file.path`. Subject and description are digested. No `1 Create`: the payload gives this plugin no way to tell a task's first revision from a later one. |
+| 39 | `todo/write` | — | — | **Dropped by default**: UI state made of user and model task text. Re-enabled, it takes the generic fallback below — metadata only, and **not** an item count. |
+| 40 | `tool/call` | by tool name: 1007 / 1001 / 4002 / 6003 | by tool name | `status_id: 0` (in flight). `metadata.correlation_uid = <session>:<callId>`. |
+| 41 | `tool/result` | by tool name (same class as its call) | by tool name | `status_id` from `content[0].isError`; `start_time`/`end_time`/`duration` from the correlated call. |
+| 42 | `tool/code-dispatch-start` | by inner tool name | by tool name | Sub-call inside `run_code`; `unmapped.dsh.parent_call_id`. |
+| 43 | `tool/code-dispatch` | by inner tool name | by tool name | Sub-call settlement; `status_id` from `isError`. |
+| 44 | `tool-workflow/run-start` | Application Lifecycle (6002) | 3 Start | |
+| 45 | `tool-workflow/run-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `stopReason`. |
+| 46 | `tool-workflow/agent-start` | Application Lifecycle (6002) | 3 Start | Member agent, with `delegation = { uid: childId, parent_uid: <this session> }`. One of the two event types that name a child by id; `team/member` is the other. |
+| 47 | `tool-workflow/agent-end` | Application Lifecycle (6002) | 4 Stop | `status_id` from `outcome`. |
+| 48 | `turn/start` | API Activity (6003) | 1 Create | The unit of agent work; `status_id: 0`. |
+| 49 | `turn/end` | API Activity (6003) | 1 Create | **`TurnEndReason` is the outcome discriminant**; `duration` from the paired `turn/start`. A provider failure contributes its `code` and a digest of its message. |
+| 50 | `user/message` | API Activity (6003) | 1 Create | `message_context.ai_role_id: 1`; `unmapped.dsh.message_source` distinguishes a human prompt from an injected context. Text digested in the SOC lane. |
+| 51 | `web/deepseek-search-llm-request` | API Activity (6003) | 2 Read | Auxiliary search request: `api.service.name = 'deepseek-search'`, `api.version` = `apiVersion`, and `ai_model` = the search provider's own model, which is not the session route. The query text is digested. |
 
 **The generic fallback** is API Activity 6003 / activity `99 Other`, `api.operation` = the event
 type, and `unmapped.dsh.event` plus whatever `turn` and `step` the payload happened to carry — no

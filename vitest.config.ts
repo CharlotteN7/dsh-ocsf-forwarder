@@ -13,7 +13,7 @@
  * and the entries below ratchet each existing file above it. Raising one means
  * writing the test; the entry is what records that the test exists.
  *
- * Sixteen of the twenty-four source files are at 100 on all four metrics. The
+ * Eighteen of the twenty-six source files are at 100 on all four metrics. The
  * eight that are not are held exactly where they are rather than exempted, and
  * no `v8 ignore` is used anywhere: the residual gap is the absent half of a few
  * `field === undefined ? {} : { field }` spreads and of two `error instanceof
@@ -44,9 +44,11 @@ export default defineConfig({
         'src/integrity/verify.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/authorization.ts': { lines: 100, functions: 100, branches: 97.61, statements: 100 },
         'src/map/heartbeat.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
+        'src/map/egress.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/index.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/interaction.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/lifecycle.ts': { lines: 100, functions: 100, branches: 99.03, statements: 100 },
+        'src/map/team.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/tool-events.ts': { lines: 100, functions: 100, branches: 98.38, statements: 100 },
         'src/map/tools.ts': { lines: 100, functions: 100, branches: 95.65, statements: 100 },
         'src/ocsf/constants.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },

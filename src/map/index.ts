@@ -15,13 +15,16 @@ import {
   mapApprovalAsked,
   mapApprovalDecided,
   mapAuthorizationState,
+  mapSubagentModelPolicy,
 } from './authorization.ts'
+import { mapSessionLogDelivery } from './egress.ts'
 import {
   mapAssistantMessage,
   mapCompaction,
   mapGeneric,
   mapHookInvoked,
   mapHookResult,
+  mapModelSelection,
   mapRequestContext,
   mapRequestHeader,
   mapScheduleChange,
@@ -44,6 +47,12 @@ import {
   mapLlmRetryStarted,
   mapPlanMode,
 } from './interaction.ts'
+import {
+  mapTeamMember,
+  mapTeamMessageDelivered,
+  mapTeamMessageQueued,
+  mapTeamTask,
+} from './team.ts'
 import {
   mapCodeDispatch,
   mapCodeDispatchStart,
@@ -85,6 +94,7 @@ export function mapEvent(
     case 'approval/policy':
     case 'sandbox/mode':
     case 'permission/preset': return mapAuthorizationState(event.type, event)
+    case 'subagent/model-selection-policy': return mapSubagentModelPolicy(event)
     case 'turn/start': return mapTurnStart(sessionId, event, state)
     case 'turn/end': return mapTurnEnd(sessionId, event, state, config)
     case 'step/start': return mapStepStart(sessionId, event, state)
@@ -92,6 +102,7 @@ export function mapEvent(
     case 'assistant/message': return mapAssistantMessage(sessionId, event, config)
     case 'user/message': return mapUserMessage(event, config)
     case 'request/context': return mapRequestContext(event, state)
+    case 'model/selection': return mapModelSelection(event)
     case 'request/header': return mapRequestHeader(event, config)
     case 'hook/invoked': return mapHookInvoked(sessionId, event)
     case 'hook/result': return mapHookResult(sessionId, event, config)
@@ -114,6 +125,11 @@ export function mapEvent(
     case 'llm/retry-started': return mapLlmRetryStarted(sessionId, event)
     case 'plan/mode': return mapPlanMode(event)
     case 'web/deepseek-search-llm-request': return mapDeepSeekSearchRequest(event, config)
+    case 'session-log-deepseek/delivery-accepted': return mapSessionLogDelivery(sessionId, event, state)
+    case 'team/member': return mapTeamMember(sessionId, event, config)
+    case 'team/message/queued': return mapTeamMessageQueued(sessionId, event, state, config)
+    case 'team/message/delivered': return mapTeamMessageDelivered(sessionId, event, state)
+    case 'team/task': return mapTeamTask(sessionId, event, config)
     // Every remaining type — including plugin-merged types this build does not
     // know — is forwarded as metadata.
     default: return mapGeneric(event.type, event)

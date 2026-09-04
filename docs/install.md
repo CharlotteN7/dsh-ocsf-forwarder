@@ -30,7 +30,8 @@ every one of these:
 |---|---|
 | `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.0-rc.8` | `0.1.0-rc.8` is where the session vocabulary grew the four `team/*` types. |
 | `0.1.1-rc.2` | The `latest` dist-tag of the `@deepseek-ai/dsh` CLI. |
-| `0.1.2-alpha.5` | The line where `Session.events` became `Session.snapshotEvents()` and `header.seedLength` became `Session.inheritedEventCount`. This plugin reads whichever the resolved version has. |
+| `0.1.2-alpha.5` | The line where `Session.events` became `Session.snapshotEvents()` and `header.seedLength` became `Session.inheritedEventCount`. This plugin reads whichever the resolved version has. It is also the first line whose vocabulary carries all 51 event types, `session-log-deepseek/delivery-accepted` among them. |
+| `0.1.2-rc.1` | The newest release the peer ranges admit, and what the devDependencies and the event table are checked against. |
 
 **Peer ranges.** `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-session-telemetry` are
 

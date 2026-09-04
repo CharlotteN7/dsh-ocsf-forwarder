@@ -41,6 +41,16 @@ export type FindingKind =
   | 'truncated'
   /** The record at an anchor's chain position is not the record the anchor came from. */
   | 'anchor-mismatch'
+  /**
+   * An anchor names a chain with no records in this input.
+   *
+   * The spool cannot distinguish a chain the shipper drained and unlinked from
+   * one deleted wholesale, so this is reported only when the caller asks for it
+   * — but it is the only signal a whole-spool replacement leaves, because a
+   * chain written under a fresh `chain_uid` never disagrees with an anchor, it
+   * fails to overlap one.
+   */
+  | 'uncorroborated-chain'
 
 /** One thing wrong with one record, located precisely enough to act on. */
 export interface ChainFinding {
@@ -88,6 +98,25 @@ export interface ChainSummary {
    * undetectable from this input.
    */
   readonly anchoredThrough?: number
+}
+
+/** How strictly to read anchors that no record in the input corroborates. */
+export interface VerifyOptions {
+  /**
+   * Treat an anchor naming a chain absent from the input as a finding.
+   *
+   * On by default. A spool replaced wholesale by a chain under a fresh
+   * `chain_uid` leaves every prior anchor unmatched and nothing else, so
+   * without this the one move that erases history verifies clean. The cost is
+   * that a host whose shipper legitimately drained and unlinked a chain's every
+   * generation reports the same way, which is why it can be turned off — but
+   * off is a decision about that host's retention, not a default.
+   *
+   * It does not close the other direction: records appended past the last
+   * anchored entry, or a second chain added beside an intact one, disturb no
+   * anchor and are not reported here.
+   */
+  readonly strictAnchors?: boolean
 }
 
 /** The result of verifying one set of spool files. */
@@ -270,6 +299,9 @@ const DETAIL: Readonly<Record<FindingKind, string>> = Object.freeze({
   'out-of-order': 'chain entry is at or before the previous record of the same chain',
   'truncated': 'the chain ends here, before an entry an anchor taken off this host accounts for',
   'anchor-mismatch': 'this chain entry is not the record the anchor for the same position came from',
+  // Every raise of this kind supplies its own detail, naming the chain and how
+  // many anchors account for it; this is the generic form the table requires.
+  'uncorroborated-chain': 'an anchor names a chain with no records in this input',
 })
 
 /** The anchors of one input, grouped by the chain each names. */
@@ -298,6 +330,7 @@ function byChain(anchors: readonly ChainAnchor[]): Map<string, ChainAnchor[]> {
 export function verifyRecords(
   sources: readonly SpoolSource[],
   anchors: readonly ChainAnchor[] = [],
+  options: VerifyOptions = {},
 ): VerifyReport {
   const findings: ChainFinding[] = []
   const chains = new Map<string, ChainState>()
@@ -350,6 +383,25 @@ export function verifyRecords(
       complete: state.firstIndex === 0,
       ...through < 0 ? {} : { anchoredThrough: through },
     })
+  }
+  // Grouped by chain rather than counted per anchor: twenty anchors on one
+  // absent chain is one thing wrong, and naming the chain is what an operator
+  // acts on. Only raised when anchors were supplied — with none there is
+  // nothing to corroborate against and nothing to be strict about.
+  const uncorroborated = [...new Set(anchors.filter(anchor => !chains.has(anchor.chainUid)).map(anchor => anchor.chainUid))]
+  if (options.strictAnchors !== false) {
+    for (const chainUid of uncorroborated) {
+      const covered = anchors.filter(anchor => anchor.chainUid === chainUid)
+      const through = Math.max(...covered.map(anchor => anchor.index))
+      findings.push({
+        kind: 'uncorroborated-chain',
+        file: sources[0]?.path ?? '',
+        line: 0,
+        uid: `${chainUid}:0`,
+        detail: `no record of chain ${chainUid} is present, though ${String(covered.length)} anchor(s) account for entries through ${String(through)}`
+          + '; a shipper that drained every generation of this chain looks the same, so confirm against this host\'s retention before treating it as deletion',
+      })
+    }
   }
   return {
     files: sources.map(source => source.path),
@@ -436,7 +488,8 @@ function readLines(path: string): SpoolSource {
 
 /** How the command is used, printed on a usage error and on `--help`. */
 const USAGE = [
-  'usage: dsh-ocsf-verify [--json] [--anchor <exported records>]... <spool path>...',
+  'usage: dsh-ocsf-verify [--json] [--no-strict-anchors]',
+  '                       [--anchor <exported records>]... <spool path>...',
   '',
   'Verifies the OCSF record_integrity hash chain of one or more spool files.',
   'Each path is verified together with its rotated generations, oldest first.',
@@ -446,6 +499,13 @@ const USAGE = [
   'records this installation already shipped, as the SIEM holds them, one JSON',
   'record per line, and reports a chain that stops short of what they account',
   'for. Without it a suffix truncation is not detected and the report says so.',
+  '',
+  'An anchor naming a chain with no records here is a finding by default: a',
+  'spool replaced wholesale by a chain under a fresh chain_uid leaves every',
+  'prior anchor unmatched and no other trace. --no-strict-anchors makes it a',
+  'count again, for a host whose shipper legitimately drained that chain.',
+  'Neither setting reports records appended past the last anchored entry, or a',
+  'second chain added beside an intact one: anchors bound a chain from below.',
   '',
   'Exit status: 0 intact, 1 findings, 2 the input could not be read.',
 ]
@@ -459,6 +519,8 @@ interface Invocation {
   readonly help: boolean
   /** An option this command does not take, or `--anchor` with nothing after it. */
   readonly malformed: boolean
+  /** False when `--no-strict-anchors` asked for the pre-0.8 counting behaviour. */
+  readonly strictAnchors: boolean
 }
 
 /**
@@ -476,9 +538,11 @@ function parse(argv: readonly string[]): Invocation {
   let json = false
   let help = false
   let malformed = false
+  let strictAnchors = true
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] as string
     if (argument === '--json') json = true
+    else if (argument === '--no-strict-anchors') strictAnchors = false
     else if (argument === '--help') help = true
     else if (argument === '--anchor') {
       const next = argv[index + 1]
@@ -491,7 +555,7 @@ function parse(argv: readonly string[]): Invocation {
     else if (argument.startsWith('--')) malformed = true
     else paths.push(argument)
   }
-  return { paths, anchorPaths, json, help, malformed }
+  return { paths, anchorPaths, json, help, malformed, strictAnchors }
 }
 
 /**
@@ -530,7 +594,7 @@ export function main(argv: readonly string[], write: (line: string) => void): nu
     write('dsh-ocsf-verify: no attestation this verifier can read in the anchor input; nothing was anchored')
     return 2
   }
-  const report = verifyRecords(sources, anchors)
+  const report = verifyRecords(sources, anchors, { strictAnchors: invocation.strictAnchors })
   if (invocation.json) write(JSON.stringify(report))
   else for (const line of formatReport(report)) write(line)
   return report.intact ? 0 : 1

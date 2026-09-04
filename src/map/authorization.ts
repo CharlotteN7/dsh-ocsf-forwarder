@@ -15,7 +15,7 @@ import type { SessionState } from '../correlate.ts'
 import { ACTIVITY, CLASS, SEVERITY, STATUS } from '../ocsf/constants.ts'
 import type { EventMapping } from '../ocsf/record.ts'
 import { summariseText } from '../privacy.ts'
-import { readString } from '../read.ts'
+import { readRecord, readString } from '../read.ts'
 
 /** The correlation id joining an approval question to its decision. */
 export function approvalCorrelationUid(sessionId: string, id: string): string {
@@ -144,6 +144,45 @@ export function mapUnresolvedApproval(
       phase: 'unresolved',
       unresolved: true,
       asked_seq: approval.seq,
+    },
+  }
+}
+
+/**
+ * Map `subagent/model-selection-policy`: the exact provider and model routes
+ * this session may hand to a child agent.
+ *
+ * It is a grant of a set of external endpoints, so it is recorded as the
+ * privileges it is rather than as a settings change. OCSF 1.9.0 constrains
+ * Authorize Session `at_least_one: [privileges, groups, iam_roles]` and this
+ * plugin emits neither of the other two, so a policy that names no usable
+ * route produces no record at all instead of an empty grant.
+ * @param event - the event's payload.
+ * @returns the record mapping, or `undefined` when no complete route is readable.
+ */
+export function mapSubagentModelPolicy(event: { data: unknown }): EventMapping | undefined {
+  const routes = readRecord(event.data)?.['allowedModels']
+  if (!Array.isArray(routes)) return undefined
+  const privileges = routes
+    .map((route) => {
+      const provider = readString(route, 'provider')
+      const model = readString(route, 'model')
+      return provider === undefined || model === undefined ? undefined : `subagent-model:${provider}/${model}`
+    })
+    .filter((privilege): privilege is string => privilege !== undefined)
+  if (privileges.length === 0) return undefined
+  return {
+    classUid: CLASS.authorizeSession,
+    activityId: ACTIVITY.authorizeSession.assignPrivileges,
+    // The same grade as every other setting later decisions are judged
+    // against: it is the list a child route is checked for membership in.
+    severityId: SEVERITY.medium,
+    statusId: STATUS.success,
+    message: `subagent model selection limited to ${String(privileges.length)} route(s)`,
+    privileges,
+    attributes: {
+      setting: 'subagent/model-selection-policy',
+      allowed_model_count: privileges.length,
     },
   }
 }

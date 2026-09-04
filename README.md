@@ -6,7 +6,7 @@ profile, and writes newline-delimited OCSF JSON to a local append-only spool —
 it to **Splunk HTTP Event Collector** or an **OTLP/HTTP** collector.
 
 📖 **[Full documentation](https://charlotten7.github.io/dsh-ocsf-forwarder/)** — including the
-complete event → OCSF mapping table for all 48 session event types.
+complete event → OCSF mapping table for all 51 session event types.
 
 ## What it does
 
@@ -20,6 +20,11 @@ complete event → OCSF mapping table for all 48 session event types.
 - Names the MCP server behind every `mcp__<server>__<tool>` call.
 - Emits a **high-severity record when a tool hands the task to an external harness**, stating in
   the record that telemetry coverage ends at that boundary.
+- Records the **session log itself leaving the host**: with `session-log-deepseek` enabled the
+  harness attaches the log's own event envelopes to every model request, and each accepted upload
+  becomes a record naming the destination service and counting the events that went with it.
+- Reads the **team** events by name — who joined, which agent messaged which other agent and
+  whether the message wakes it, and the write scopes a shared task carries.
 - Emits a periodic **heartbeat** carrying counters, live session count and delivery cursor, so a
   host that goes quiet is distinguishable from one that is idle. A spool that has stopped writing
   reports itself there at `severity_id: 5`, with the count of what it dropped.
@@ -58,7 +63,7 @@ Pin `@deepseek-ai/dsh-headless` explicitly — the `@deepseek-ai/dsh-*` librarie
 still points at `0.0.1-rc.1`. Install from the registry or a packed tarball, **not** from a git
 spec: `lib/` is a build output git does not carry.
 
-Runs on dsh `0.1.0-rc.6` through the `0.1.1` line; CI runs the end-to-end suite against every line
+Runs on dsh `0.1.0-rc.6` through the `0.1.2` line; CI runs the end-to-end suite against every line
 in that range.
 
 [Install in full →](https://charlotten7.github.io/dsh-ocsf-forwarder/install.html)
@@ -115,7 +120,11 @@ the SIEM and reports a spool that stops short of them. Without anchors the repor
 rather than implying it checked.
 
 The fingerprints are **unkeyed**, so anyone can recompute them — which is the point, and which also
-means the chain does not resist the agent it observes.
+means the chain does not resist the agent it observes. A spool replaced wholesale under a fresh
+`chain_uid` contradicts no anchor; it fails to overlap one, and since 0.8.0 an anchor naming a chain
+that is absent is a finding (`--no-strict-anchors` makes it a count again, for a host whose shipper
+legitimately drained that chain). What remains open is direction: anchors bound a chain from below
+and never from above, so records *added* past the last one delivered are not caught.
 
 [The canonicalisation, the threat model, and the cost →](https://charlotten7.github.io/dsh-ocsf-forwarder/integrity.html)
 

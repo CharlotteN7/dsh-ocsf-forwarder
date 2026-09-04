@@ -55,6 +55,19 @@ export function readArrayLength(data: unknown, key: string): number | undefined 
 }
 
 /**
+ * Read an array field's string members.
+ * @param data - the event payload.
+ * @param key - the field name.
+ * @returns the members that are strings, or `undefined` when the field is
+ *   absent or not an array. A member of any other type is left out rather than
+ *   rendered, so the result never carries a value the log did not spell.
+ */
+export function readStringArray(data: unknown, key: string): readonly string[] | undefined {
+  const value = readRecord(data)?.[key]
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : undefined
+}
+
+/**
  * Narrow a value to a plain record.
  * @param data - the candidate value.
  * @returns the record, or `undefined` for anything else (arrays included).

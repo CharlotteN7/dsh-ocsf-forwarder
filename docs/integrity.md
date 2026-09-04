@@ -274,14 +274,69 @@ What the chain does buy:
   including heartbeats and records from other sessions. **A deletion at the end of the file is
   not**: see [Truncation](#truncation-the-deletion-the-chain-cannot-see), which needs an anchor
   from the shipped stream and cannot be done locally at all.
-- **Records already off the host become anchors.** The SIEM holds fingerprints for everything
-  shipped. Any later rewrite of the spool must either leave those records exactly as they were or
-  produce a chain that disagrees with what the SIEM already has, and `dsh-ocsf-verify --anchor`
-  makes that comparison. The undetectable-tampering window is the time between a record being
-  written and being delivered — one `flushIntervalMs`, five seconds by default.
+- **Records already off the host become anchors,** *for the chain they belong to.* The SIEM holds
+  fingerprints for everything shipped, and a rewrite that keeps the same `chain_uid` must either
+  leave those records exactly as they were or produce fingerprints that disagree with the SIEM's,
+  which `dsh-ocsf-verify --anchor` reports as `anchor-mismatch`. A rewrite that does **not** keep
+  the `chain_uid` is a different matter — see [Re-chaining](#re-chaining-and-fabrication) — and so
+  is anything added rather than changed. The undetectable-tampering window for an in-chain edit is
+  the time between a record being written and being delivered: one `flushIntervalMs`, five seconds
+  by default.
 - **Nothing about the agent's honesty.** A record that was never written is not missing from a
   chain that never contained it. This is tamper-evidence for the audit trail, not attestation of
   the agent's behaviour.
+
+## Re-chaining and fabrication
+
+`chain_uid` is minted by the writer and is bound to nothing the writer cannot forge. There is no
+roster of chains that legitimately existed, so the verifier cannot ask whether a chain *should*
+exist — only whether one the anchors name is *here*. Since 0.8.0 it treats that absence as a
+finding. Each row below is reproduced in `tests/unit/integrity-tamper.spec.ts`:
+
+| What a tamperer does | Verifier's answer |
+|---|---|
+| Cuts entries `7-9` off the anchored chain | `truncated`, **exit 1** |
+| Edits entry `4` of the anchored chain, re-hashing the rest | `anchor-mismatch`, **exit 1** |
+| **Replaces the whole file** with a fresh 7-entry chain under a new `chain_uid`, dropping `7-9` and editing `4` | `uncorroborated-chain`, **exit 1** — but `INTACT`, exit 0, under `--no-strict-anchors` |
+| **Adds a second chain** of records that never happened, leaving the honest chain untouched | `INTACT`, **exit 0** |
+| **Continues the anchored chain** past its anchored end with records that never happened | `INTACT`, **exit 0** |
+
+The first two are the moves the anchor check was built for. The third is what a reader of this page
+does instead once they know that: it does not *disagree* with the anchors, it fails to *overlap*
+them. Until 0.8.0 the comparison simply never ran, and all it left behind was
+`10 anchor(s) name a chain with no records here` — a count, not a finding, and one this page's own
+[Chains, rotation, and gaps](#chains-rotation-and-gaps) section teaches operators to read as a
+shipper that drained a generation. It is now `uncorroborated-chain` and exits `1`.
+
+**This is a real trade, stated plainly.** A host whose shipper legitimately drained and unlinked
+every generation of a chain produces exactly the same report, and no evidence on that host
+distinguishes the two — that is why the count existed. `--no-strict-anchors` restores it, and using
+it is a claim about that host's retention, not a way to quieten a report. The default is strict
+because a spool replaced wholesale leaves no other trace at all, and a control that stays silent on
+the one move that erases history is worse than one an operator has to reason about.
+
+The fourth and fifth are untouched by that default, and are the other half:
+**anchors bound a chain from below, never from above.**
+They say entries `0…N` existed and what they were. They say nothing about entries after `N`, and
+nothing at all about a chain the SIEM has never seen. So records can be *added* — an
+`approval/decided` with outcome `rejected`, to make an action that ran look blocked — and neither
+the file nor the anchors contradict them.
+
+Two things narrow this in practice, and neither closes it:
+
+- **A SIEM already holding the delivered stream can do what the verifier does not.** An
+  installation's `device.uid` is inside every hashed record, and the delivered stream names every
+  `chain_uid` that installation ever shipped under. A chain appearing in a spool that the SIEM has
+  no record of, or a spool whose chains do not include the one the SIEM last saw, is a query — not
+  one `dsh-ocsf-verify` runs for you.
+- **Fabrication has to survive the rest of the evidence.** A forged `approval/decided` still has to
+  agree with a real `tool/call`, a real `metadata.sequence` run for its session, and the shipped
+  copy of both. That is work, and it is not verification.
+
+Whether an anchor naming an absent chain should become a finding rather than a count is a
+deployment question this package has not answered: on a host whose shipper legitimately drained and
+unlinked a generation it is routine, and making it fail would train operators to ignore it — the
+failure mode the whole design is trying to avoid.
 
 ## Verifying a spool
 

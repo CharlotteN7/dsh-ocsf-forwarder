@@ -81,6 +81,8 @@ rather than its content:
 | Schedule ids, goal ids, command ids, call ids, handler ids | `job.uid`, `unmapped.dsh.*_id` | Durable identifiers a SOC pivots and joins on. |
 | **Model-chosen argument names** | `unmapped.dsh.arguments[].key` | The model names its own arguments. A digest of `file_path` groups nothing and tells nobody which argument the value belonged to. The argument's **value** follows `privacy.argumentValues`. |
 | **A tool error's `name` and `code`** | `status_detail`, from `tool/result.error` | The failure class, chosen by the tool implementation rather than composed per call. |
+| **A team member's `name`** | `unmapped.dsh.member_name`, `.sender_name` | The label a `team/message/queued` repeats as its sender. A digest of it joins nothing. The member's **description** is digested. |
+| **A team task's `writeScopes`** | `unmapped.dsh.write_scopes` | A path pattern, on the same reasoning as `file.path`: it is what a detection matches on. The task's **subject** and **description** are digested. |
 | **A hook's `matcher`** | `unmapped.dsh.matcher` | A deployment-authored pattern from the hook configuration, not model or user input — the one pattern on this page that is not digested, and it is deployment-trusted where a `grep` pattern is not. |
 | Enumerated outcomes | `status_detail`, `unmapped.dsh.end_reason`, `.decision`, `.mode` | See below. |
 
@@ -100,7 +102,7 @@ records with the verbatim event payload in `raw_data`, joined to the SOC lane on
 | Field | Joins |
 |---|---|
 | `metadata.uid` = `<session>:<seq>` | The idempotency key. Deduplicate on it. `<seq>` is the session log's own event sequence. `dsh-netguard` writes `<session>:netguard:<seq>` over a counter of its own, so deduplicating an index holding both packages does not drop its records as duplicates of these. |
-| `metadata.correlation_uid` | `<session>:<callId>` for a tool call and its result, `<session>:approval:<id>` for an approval pair, `<session>:turn:<n>`, `<session>:<turn>:<step>`. |
+| `metadata.correlation_uid` | `<session>:<callId>` for a tool call and its result, `<session>:approval:<id>` for an approval pair, `<session>:turn:<n>`, `<session>:<turn>:<step>`, `<session>:team-message:<id>` for a queued message and its delivery, `<session>:team-task:<id>`, `<session>:team:<teamId>`, `<session>:session-log-delivery` for every upload of the log. |
 | `metadata.sequence` | The session-log seq — a per-session gap detector. |
 | `ai_agent.instance_uid` / `unmapped.dsh.session_id` | The session. `parent_session_id` and `seed_length` stitch forks. |
 | `unmapped.dsh.turn`, `.step`, `.call_id`, `.approval_id` | Agent-loop position and pairing ids. |

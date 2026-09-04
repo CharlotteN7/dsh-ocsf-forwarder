@@ -59,6 +59,11 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
   hookMatcher: 'SENTINEL-notasecret-hook-matcher',
   teamMessage: 'SENTINEL-teammsg-share-key-AKIA7777EXAMPLE',
   teamTask: 'SENTINEL-teamtask-rotate-the-vault-secret',
+  teamTaskSubject: 'SENTINEL-teamsubject-decrypt-the-prod-dump',
+  teamMemberDescription: 'SENTINEL-teamdesc-use-the-admin-token-shh',
+  teamMemberError: 'SENTINEL-teamerr-route-rejected-key-sk-77',
+  teamMemberName: 'SENTINEL-notasecret-team-member-name',
+  teamWriteScope: 'SENTINEL-notasecret-team-write-scope',
 })
 
 /**
@@ -66,7 +71,9 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
  * `docs/operations.md` § Two lanes names it. The assertions below list these
  * rather than a bare set, so widening the lane means changing this list.
  */
-const DELIBERATE: readonly string[] = ['argumentKey', 'hookMatcher', 'scheduleId', 'toolErrorName']
+const DELIBERATE: readonly string[] = [
+  'argumentKey', 'hookMatcher', 'scheduleId', 'teamMemberName', 'teamWriteScope', 'toolErrorName',
+]
 
 /**
  * Every text-bearing surface a session event offers, each carrying its own
@@ -278,11 +285,77 @@ function events(): MappableEvent[] {
     // must read the payload's shape and never its content.
     { type: 'someone-elses-plugin/event', seq: 39, time: 1_039, data: { turn: 1, note: SENTINELS['prompt'] } },
     { type: 'compaction/end', seq: 40, time: 1_040, data: { compactionId: 'k1', turn: 1, error: SENTINELS['compactionError'] } },
-    // The `team/*` types the vocabulary gained in 0.1.0-rc.8. No installed
-    // package declares their payload, so they take the same generic fallback,
-    // and agent-to-agent text is exactly the content it must not read.
-    { type: 'team/message/queued', seq: 41, time: 1_041, data: { to: 'member-2', text: SENTINELS['teamMessage'] } },
-    { type: 'team/task', seq: 42, time: 1_042, data: { id: 't1', objective: SENTINELS['teamTask'] } },
+    // The `team/*` types: several agents in one team, and the text they hand
+    // each other. A member's name is the identifier a message repeats as its
+    // sender, so it is verbatim; everything a model or a user composed is not.
+    {
+      type: 'team/member',
+      seq: 41,
+      time: 1_041,
+      data: {
+        version: 1,
+        teamId: 'team-9',
+        member: {
+          id: 'session-child',
+          name: SENTINELS['teamMemberName'],
+          description: SENTINELS['teamMemberDescription'],
+          provider: 'spawn',
+          context: 'fork',
+          phase: 'failed',
+          error: SENTINELS['teamMemberError'],
+        },
+      },
+    },
+    {
+      type: 'team/message/queued',
+      seq: 42,
+      time: 1_042,
+      data: {
+        version: 1,
+        teamId: 'team-9',
+        message: {
+          id: 'msg-1',
+          senderId: 'session-child',
+          senderName: SENTINELS['teamMemberName'],
+          targetId: 'session-other',
+          delivery: 'wakeup',
+          content: [{ type: 'text', text: SENTINELS['teamMessage'] }],
+        },
+      },
+    },
+    { type: 'team/message/delivered', seq: 43, time: 1_043, data: { version: 1, teamId: 'team-9', messageId: 'msg-1', targetId: 'session-other' } },
+    {
+      type: 'team/task',
+      seq: 44,
+      time: 1_044,
+      data: {
+        version: 1,
+        teamId: 'team-9',
+        task: {
+          id: 'task-3',
+          revision: 2,
+          subject: SENTINELS['teamTaskSubject'],
+          description: SENTINELS['teamTask'],
+          status: 'in_progress',
+          ownerId: 'session-child',
+          blockedBy: ['task-1'],
+          // A path pattern, carried verbatim on the same reasoning as
+          // `file.path`.
+          writeScopes: [SENTINELS['teamWriteScope']],
+        },
+      },
+    },
+    // The route decisions and the session-log delivery carry identifiers and
+    // counts rather than composed text; they are driven here so a field added
+    // to any of them lands inside this invariant rather than beside it.
+    { type: 'model/selection', seq: 45, time: 1_045, data: { provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'high' } },
+    {
+      type: 'subagent/model-selection-policy',
+      seq: 46,
+      time: 1_046,
+      data: { allowedModels: [{ provider: 'deepseek-official', model: 'deepseek-chat' }] },
+    },
+    { type: 'session-log-deepseek/delivery-accepted', seq: 47, time: 1_047, data: { sessionId: 'S1', throughSeq: 46 } },
   ]
 }
 

@@ -1014,3 +1014,146 @@ this process can take `CAP_LINUX_IMMUTABLE` and skip where it cannot; an injecte
 `fchmodSync` seam covers the handling unconditionally, and the test file says which is which. The
 skip is honest rather than silent: on a runner without the capability the append-only claims in
 this repository are covered by the injected half only.
+
+---
+
+## 47. The three event types `0.1.2` added, and the four `team/*` ones nobody read
+
+**Context.** §45 moved the devDependencies to `0.1.1-rc.2` and recorded that the four `team/*`
+types take the generic fallback because "no installed package declares their payloads". Both halves
+of that had aged. The peer range `~0.1.2-alpha.0` admits every `0.1.2` prerelease — node-semver
+puts `0.1.2-rc.1` inside it — so the newest line the range promises had moved three releases past
+what the devDependencies were checked against, and `KNOWN_SESSION_EVENT_TYPES` had grown from 48 to
+51 as of `0.1.2-alpha.5` without the table noticing. And the `team/*` payloads are not undeclared: the merged
+`SessionEventMap` the harness compiles its own vocabulary against is published inside every
+`lib/typert.host.js` a harness package ships, `TeamMemberSnapshot`, `TeamMessageSnapshot` and
+`TeamTaskSnapshot` included. Nothing here reads payloads through their types anyway — `src/read.ts`
+exists because `SessionEventMap` is merge-extensible and every payload arrives from a durable log.
+
+**Decision. Seven of the eight took a mapper.** The devDependencies and the `pnpm-workspace.yaml`
+overrides moved to `0.1.2-rc.1` together, because `dsh-session@0.1.2-rc.1` reaches
+`dsh-typert-protocol` through `dsh-llm` and an override pinned three releases back turns
+`import { KNOWN_SESSION_EVENT_TYPES }` into a missing-export error.
+
+- **`session-log-deepseek/delivery-accepted` → API Activity 6003 / `1 Create`.** The one session
+  event that says the audit subject left the host: the base bundle's `session-log-deepseek` row,
+  enabled, attaches the log's own canonical event envelopes to every model request and appends this
+  event when the endpoint takes them. `severity_id: 2`, deliberately not high — acceptance is
+  appended once per *successful model request*, and grading each one an incident buries the index.
+  What acts is the record existing at all where policy forbids the upload, plus
+  `api.service.name`. `delivered_after_seq` and `delivered_event_count` appear only once a
+  preceding watermark has been observed; the first delivery says `first_observed_delivery` rather
+  than subtracting from an assumed `-1`, which would claim the whole log went in one upload. A
+  marker naming another session was inherited through a fork seed — the harness's own invariant —
+  and is graded `severity_id: 1`, because nothing left on this session's account.
+- **`team/message/queued` → API Activity 6003 / `1 Create`,** with the sender's session, the
+  target's session, and `delivery`. `wakeup` is `severity_id: 3` and `quiet` is `2`: one makes the
+  target act on the text now, the other waits for its own next turn. This is one agent putting
+  instructions into another agent's inbox, and the fallback carried no sender, no target and no
+  delivery mode. `team/message/delivered` closes the pair on `messageId`.
+- **`team/member` → Application Lifecycle 6002 / `3 Start`,** and the second event type that names
+  a child session by id, so it builds the same `delegation` link `tool-workflow/agent-start` does.
+  §31's "the one event that names a child" is no longer true and the mapping table says so.
+- **`team/task` → API Activity 6003 / `3 Update` or `4 Delete`.** `write_scopes` verbatim, on
+  `file.path`'s reasoning: a path pattern is what a detection matches. **No `1 Create`**: the
+  payload is a snapshot with a revision whose origin is unreadable here, so calling one of them the
+  creation would be a guess.
+- **`subagent/model-selection-policy` → Authorize Session 3003 / `1 Assign Privileges`,** as
+  `privileges: [subagent-model:<provider>/<model>]`. It is a grant of a set of external endpoints,
+  not a settings change. A policy naming no complete route produces **no record**: OCSF constrains
+  the class `at_least_one: [privileges, groups, iam_roles]` and this plugin emits neither of the
+  other two, so an empty grant is not a valid record and the event is reported unreadable.
+- **`model/selection` → Application Lifecycle 6002 / `8 Update`,** carrying `ai_model`. It does
+  **not** fold `state.aiModel`. `request/context` records the route a request actually used; a
+  selection is what the *next* one should use, and folding it in would attribute every record
+  between the two to a model that has served nothing.
+
+**What is proven and how.** Every one of the twenty-eight new mapping assertions was run against
+the previous code first and failed there; two that passed were rewritten until they did not,
+because a test that passes against the generic fallback proves nothing about the mapper replacing
+it. The eight types are in the conformance run, so their records are checked against the OCSF
+1.9.0 class and object definitions rather than against the union — a `file` object added to the
+`team/member` mapping is rejected as `6002: file`. The session-log delivery has an end-to-end test
+that enables the row in a real profile, boots a real `dsh`, and asserts the mock's captured request
+body carried `dsh_session_log` with the log's own events in it: the record and the egress it
+describes are checked against each other rather than separately.
+
+**What is not proven.** No package installed here emits any `team/*` event; `dsh-session` lists the
+four types and the emitter is not in the `0.1.2-rc.1` tree. The payload fields come from the
+harness's published Typert declaration catalogue, and the mappers read every one of them through
+`src/read.ts`, so a build whose emitter writes something else yields absent attributes rather than
+wrong ones — but no run in this repository has produced one of these events.
+
+---
+
+## 48. Anchors bound a chain from below, and the page claimed more than that
+
+**Context.** §44 built anchoring: shipped records carry their own attestations, so the SIEM holds a
+claim about how far a chain got that the writer of the spool cannot edit. `docs/integrity.md` then
+said that any later rewrite "must either leave those records exactly as they were or produce a
+chain that disagrees with what the SIEM already has, and `dsh-ocsf-verify --anchor` makes that
+comparison". Run against the shipped verifier, it does not.
+
+**What was measured.** Five spools, one honest and four tampered, verified with the published
+`bin/dsh-ocsf-verify.mjs` and the exit status read directly rather than through a pipe:
+
+| Tampering | Report | Exit |
+|---|---|---|
+| Cut entries 7-9 off the anchored chain | `truncated` | 1 |
+| Edit entry 4 of the anchored chain, re-hashing the rest | `anchor-mismatch` | 1 |
+| Replace the file with a fresh 7-entry chain under a new `chain_uid`, dropping 7-9 and editing 4 | `INTACT` | **0** |
+| Append a second self-consistent chain of records that never happened | `INTACT` | **0** |
+| Continue the anchored chain past entry 9 with records that never happened | `INTACT` | **0** |
+
+**The reading.** `chain_uid` is minted by the writer and bound to nothing the writer cannot forge,
+and `verifyRecords` counts an anchor naming an absent chain in `unmatchedAnchors` rather than
+raising a finding, so `intact` stays true. A rewrite under a new chain does not *disagree* with the
+anchors; it fails to *overlap* them and the comparison never runs. Its only trace is a line the
+integrity page itself teaches operators to read as a shipper that drained a generation. And in the
+other direction anchors say nothing at all: they bound a chain from below — entries `0…N` existed
+and were these — never from above, so records can be *added* past `N`, or in a chain the SIEM has
+never seen, and nothing contradicts them.
+
+**Decision: state it, pin it, and do not change the exit code.** The overclaiming sentence is
+corrected, a `Re-chaining and fabrication` section carries the table above, and
+`tests/unit/integrity-tamper.spec.ts` pins all five outcomes so the day someone makes an
+uncorroborated chain a finding, the pins fail and the decision gets recorded rather than absorbed.
+Making `unmatchedAnchors > 0` fail today was rejected: on a host whose shipper legitimately drained
+and unlinked a generation it is routine, and a check that fails routinely trains operators to
+ignore it, which is the failure this whole design is trying to avoid. The query that *would* close
+it — does the SIEM know this installation's chains, and does the spool contain the chain it last
+saw — belongs to the SIEM, which holds both sides of it, and the page says so instead of pretending
+the local verifier can.
+
+## 49. An uncorroborated chain is a finding, and the count it replaced is a flag
+
+§48 recorded that a spool replaced wholesale under a fresh `chain_uid` verified `INTACT` and exited
+`0`, because the forged chain never *disagrees* with an anchor — it fails to *overlap* one, and the
+comparison never runs. The only trace was the line `N anchor(s) name a chain with no records here`,
+which `docs/integrity.md` itself teaches operators to read as a shipper that drained a generation.
+
+Since 0.8.0 that absence is the finding `uncorroborated-chain`, and it exits `1` by default.
+
+The cost is real and was weighed rather than discovered later. A host whose shipper legitimately
+drained and unlinked every generation of a chain produces a byte-identical report, and **nothing on
+that host distinguishes the two** — the spool cannot testify about records it no longer holds. So
+the default makes a class of honest installation report `BROKEN`, and the counter-argument to it is
+the strongest one in this file: a check that fails routinely trains operators to ignore it, which
+costs more than it buys.
+
+It is the default anyway, for one reason: a whole-spool replacement leaves *no other trace at all*.
+Every other tampering shape this verifier knows about is caught by the chain itself. This one was
+caught by nothing, and a control that stays silent on the single move that erases history is worse
+than one an operator has to reason about. `--no-strict-anchors` restores the count, and reaching for
+it is a claim about that host's retention.
+
+The finding is raised **per chain, not per anchor** — twenty anchors on one absent chain is one
+thing wrong, and the `chain_uid` is what an operator carries to the SIEM. It is raised only when
+anchors were supplied, because with none there is nothing to corroborate against.
+
+What this does **not** close is direction. Anchors still bound a chain from below and never from
+above, so the fourth and fifth rows of §48's table — a second fabricated chain beside an intact one,
+and records appended past the last anchored entry — disturb no anchor and are reported by neither
+setting. Those remain pinned in `tests/unit/integrity-tamper.spec.ts` as limitations. The query that
+closes them belongs to the SIEM, which holds both the delivered stream and the roster of
+`chain_uid`s an installation ever shipped under; this verifier sees one host's files and cannot.

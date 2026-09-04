@@ -7,6 +7,10 @@
  * API Activity 6003 / activity `99 Other` with metadata only. The table read
  * as a specification and was a wish list, and nothing in the suite could tell
  * the difference, because nothing read the table.
+ *
+ * The vocabulary comes from the resolved `@deepseek-ai/dsh-session`, so the
+ * table describes the newest harness the peer range admits and a row for a
+ * type the resolved copy has never heard of fails here.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -53,6 +57,22 @@ function rows(): readonly Row[] {
     })
 }
 
+/**
+ * The minimal payload each mapper needs before it will build a record at all.
+ * Most identify themselves with a top-level `id`; the ones below carry theirs
+ * somewhere else, and a mapper handed none of it reports the event unreadable
+ * rather than emitting a record with an invented subject.
+ */
+const IDENTITY: Readonly<Record<string, unknown>> = Object.freeze({
+  'model/selection': { provider: 'p', model: 'm' },
+  'subagent/model-selection-policy': { allowedModels: [{ provider: 'p', model: 'm' }] },
+  'session-log-deepseek/delivery-accepted': { sessionId: 'S1', throughSeq: 0 },
+  'team/member': { member: { id: 'child' } },
+  'team/message/queued': { message: { id: 'msg-1' } },
+  'team/message/delivered': { messageId: 'msg-1' },
+  'team/task': { task: { id: 'task-1' } },
+})
+
 describe('the published event table', () => {
   const table = rows()
 
@@ -66,11 +86,12 @@ describe('the published event table', () => {
     const wrong = table
       .filter(row => row.classUid !== undefined)
       .map((row) => {
-        // The payload carries nothing but the pairing id the two approval
-        // mappers refuse to build a record without. Everything else is left
-        // out on purpose: a row's class and activity must not depend on which
-        // optional fields the payload happened to carry.
-        const event = { type: row.eventType, seq: 1, time: 1_000, data: { id: 'a1' } }
+        // The payload carries nothing but the identity the mapper refuses to
+        // build a record without. Everything else is left out on purpose: a
+        // row's class and activity must not depend on which optional fields
+        // the payload happened to carry, so a row whose activity DOES follow a
+        // payload field lists several and this check pins only its class.
+        const event = { type: row.eventType, seq: 1, time: 1_000, data: IDENTITY[row.eventType] ?? { id: 'a1' } }
         const mapping = mapEvent('S1', event, new SessionState(), config)
         if (mapping === undefined) return `${row.eventType}: no mapping`
         const claimed = `${String(row.classUid)}/${String(row.activityId ?? mapping.activityId)}`

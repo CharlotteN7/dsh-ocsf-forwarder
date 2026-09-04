@@ -418,6 +418,41 @@ function emitted(): readonly OcsfRecord[] {
     },
     { type: 'compaction/start', seq: 38, time: 1_038, data: { compactionId: 'k9', turn: 1 } },
     { type: 'compaction/end', seq: 39, time: 1_039, data: { compactionId: 'k9', turn: 1 } },
+    { type: 'model/selection', seq: 40, time: 1_040, data: { provider: 'deepseek-official', model: 'deepseek-reasoner' } },
+    {
+      type: 'subagent/model-selection-policy',
+      seq: 41,
+      time: 1_041,
+      data: { allowedModels: [{ provider: 'deepseek-official', model: 'deepseek-chat' }] },
+    },
+    { type: 'session-log-deepseek/delivery-accepted', seq: 42, time: 1_042, data: { sessionId: 'S1', throughSeq: 41 } },
+    {
+      type: 'team/member',
+      seq: 43,
+      time: 1_043,
+      data: { version: 1, teamId: 't9', member: { id: 'child', name: 'reviewer', provider: 'spawn', context: 'fork', phase: 'active' } },
+    },
+    {
+      type: 'team/message/queued',
+      seq: 44,
+      time: 1_044,
+      data: {
+        version: 1,
+        teamId: 't9',
+        message: { id: 'm1', senderId: 'child', senderName: 'reviewer', targetId: 'other', delivery: 'wakeup', content: [] },
+      },
+    },
+    { type: 'team/message/delivered', seq: 45, time: 1_045, data: { version: 1, teamId: 't9', messageId: 'm1', targetId: 'other' } },
+    {
+      type: 'team/task',
+      seq: 46,
+      time: 1_046,
+      data: {
+        version: 1,
+        teamId: 't9',
+        task: { id: 'k1', revision: 1, subject: 's', description: 'd', status: 'in_progress', ownerId: 'child', blockedBy: [], writeScopes: ['src/**'] },
+      },
+    },
   ]
   const session: ForwardableSession = { id: 'S1', firstLiveSeq: 0, seq: events.length, events, header: { cwd: '/srv' } }
   const forwarder = new Forwarder(testEnvironment(config), config, sink, undefined, error => { throw error })

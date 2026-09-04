@@ -285,15 +285,39 @@ describe('a spool whose end was cut off', () => {
     expect(report.chains[0]).toMatchObject({ firstIndex: 2, anchoredThrough: 1 })
   })
 
-  it('does not call an anchor for a chain that is not here a finding, and says it checked nothing', () => {
+  it('calls an anchor for a chain that is not here a finding, and still says what it counted', () => {
+    // Until 0.8.0 this was a count and nothing else, which let a spool replaced
+    // wholesale under a fresh chain_uid verify clean: the forged chain
+    // contradicts no anchor, it just fails to overlap one.
     const report = verifyRecords(
       [{ path: 'spool.jsonl', lines: chainLines(3, 'chain-b') }],
       anchorsOf([chainLines(3, 'chain-a')[2] as string]),
     )
+    expect(report.findings.map(finding => finding.kind)).toEqual(['uncorroborated-chain'])
+    expect(report.unmatchedAnchors).toBe(1)
+    expect(report.intact).toBe(false)
+    expect(formatReport(report).join('\n')).toContain('1 anchor(s) name a chain with no records here')
+  })
+
+  it('leaves that same input intact when the operator turns strict anchors off', () => {
+    // A host whose shipper drained and unlinked every generation of a chain
+    // reports identically, so the counting behaviour stays reachable.
+    const report = verifyRecords(
+      [{ path: 'spool.jsonl', lines: chainLines(3, 'chain-b') }],
+      anchorsOf([chainLines(3, 'chain-a')[2] as string]),
+      { strictAnchors: false },
+    )
     expect(report.findings).toEqual([])
     expect(report.unmatchedAnchors).toBe(1)
     expect(report.intact).toBe(true)
-    expect(formatReport(report).join('\n')).toContain('1 anchor(s) name a chain with no records here')
+  })
+
+  it('names no file on an uncorroborated chain when there was no spool to name', () => {
+    // Anchors with nothing to verify them against: the finding still has to say
+    // which chain went missing, and there is no path to attribute it to.
+    const report = verifyRecords([], anchorsOf([chainLines(3, 'chain-a')[2] as string]))
+    expect(report.findings.map(finding => finding.kind)).toEqual(['uncorroborated-chain'])
+    expect(report.findings[0]?.file).toBe('')
   })
 
   it('takes no anchor from a line it cannot read a chain entry out of', () => {
@@ -324,6 +348,24 @@ describe('the verifier as a command', () => {
     expect(main([spool], line => output.push(line))).toBe(1)
     expect(output.join('\n')).toContain(`altered ${spool}:2`)
   })
+
+    it('exits one on a spool whose chain no anchor corroborates, and zero with --no-strict-anchors', () => {
+      // The whole-spool replacement, end to end through the command: the file is
+      // internally perfect, and the only thing wrong is that the chain the SIEM
+      // holds anchors for is absent.
+      const spool = join(dir, 'ocsf.jsonl')
+      const anchorFile = join(dir, 'shipped.jsonl')
+      writeFileSync(spool, `${chainLines(3, 'chain-forged').join('\n')}\n`)
+      writeFileSync(anchorFile, `${chainLines(3, 'chain-real').join('\n')}\n`)
+
+      const strict: string[] = []
+      expect(main(['--anchor', anchorFile, spool], line => strict.push(line))).toBe(1)
+      expect(strict.join('\n')).toContain('no record of chain chain-real is present')
+
+      const relaxed: string[] = []
+      expect(main(['--no-strict-anchors', '--anchor', anchorFile, spool], line => relaxed.push(line))).toBe(0)
+      expect(relaxed.join('\n')).toContain('INTACT')
+    })
 
   it('emits the whole report as JSON when asked', () => {
     const spool = join(dir, 'ocsf.jsonl')
