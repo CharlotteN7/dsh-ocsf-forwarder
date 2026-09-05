@@ -1157,3 +1157,89 @@ and records appended past the last anchored entry — disturb no anchor and are 
 setting. Those remain pinned in `tests/unit/integrity-tamper.spec.ts` as limitations. The query that
 closes them belongs to the SIEM, which holds both the delivered stream and the roster of
 `chain_uid`s an installation ever shipped under; this verifier sees one host's files and cannot.
+
+## 50. The `inspector` seam is declared, unimplemented, and not ours to provide
+
+`@deepseek-ai/dsh-tool-cordis@0.1.2-rc.1` publishes the API catalogue the model reads. At
+`lib/index.js:1558` it declares the seam key `inspector` — "Shared Host/Client service façade over
+the realm's source publisher" — with two members: `publish(topic, payload, monotonicMs?): void` and
+`readonly cordis: CordisRuntimeTreeReader`. Nothing provides it and nothing consumes it: across the
+660 JavaScript files in the 224 `@deepseek-ai` package directories of the rc-1.2.1 cache, the word
+appears only in that catalogue, in `dsh-subprocess-local`'s process inspector, and in
+`dsh-client-ui-trajectory`'s record inspector, none of which is a context service. Four of the
+catalogue's 68 keys have no provider there — `agentTeams`, `e2b`, `inspector`, `lsp` — and
+`@deepseek-ai/dsh-e2b` and `@deepseek-ai/dsh-lsp` both resolve on the npm registry, so absence from
+this cache is not evidence a key is unimplemented upstream. `@deepseek-ai/dsh-inspector` is a 404,
+and none of the 241 `@deepseek-ai` names the registry search returns contains `inspect`.
+
+This package is the observability one, so providing that key and turning published observations into
+spooled OCSF records is the obvious home for it. It was measured rather than assumed, and it is not
+being built. Four findings, of which the first two are each sufficient.
+
+**Collision has no safe design.** `ReflectService.provide` (cordis 4.0.2, `src/reflect.ts`) throws
+`service "<name>" has been registered at <fiber>` when the store already holds the key, inside the
+`ctx.fiber.effect` it opens, so the second provider's fiber fails. What the second provider is
+decides how bad that is:
+
+| Load order | Our fiber | Harness fiber | A consumer that `inject`s `inspector` |
+|---|---|---|---|
+| Harness first | FAILED | ACTIVE | binds the harness implementation |
+| Us first | ACTIVE | FAILED | **binds ours**, and reads `.cordis` as `undefined` |
+
+The second row is the one that matters. The harness does not fail to boot; it boots with our object
+in the seam, and its own consumers keep running against a façade whose second member does not exist.
+Releasing our registration afterwards does not repair it — the failed fiber stays FAILED, the
+consumer drops back to PENDING, and the key resolves to `undefined` for the rest of the process.
+Standing down on detection covers only the first row: `ctx.get('inspector', false)` sees a provider
+that already registered and cannot see one that registers later, and cordis offers no signal between
+the two. Providing inside `ctx.isolate('inspector')` does avoid the collision — both fibers stay
+ACTIVE and the consumer reaches the harness — precisely because nothing outside our own subtree can
+see what we registered, which is not a seam.
+
+Half the seam is also unimplementable here. `CordisRuntimeTreeReader.getTree(): Promise<CordisRuntimeTree>`
+returns the harness's own runtime topology in the shape its inspector expects. Supplying that from
+this package means inventing it, and a partial façade is exactly the hollow centre the no-stubs rule
+exists to prevent, since a consumer reading `.cordis` gets `undefined` with nothing to distinguish
+"not provided" from "provided by something that could not implement it".
+
+**Attribution is advisory and forgery costs one line.** Cordis does carry a caller identity: a
+`Service` sets `[symbols.tracker] = { associate: name, property: 'ctx' }`, so inside a method reached
+as `ctx.inspector.publish(...)` the service's `this.ctx` is the *reading* context and
+`this.ctx.fiber.name` names the calling plugin. It survives no adversary. The raw instance is one
+property read away at `ctx.reflect.store[ctx[Context.isolate]['inspector']].value`, and
+
+    raw.publish.call({ ctx: { fiber: { name: 'plugin-alpha' } } }, 'topic', {})
+
+writes a record attributed to `plugin-alpha` from code that is not `plugin-alpha`. The honest path is
+the fragile one: a detached `const p = ctx.inspector.publish` throws, because the traceable wrapper
+binds `this` per property read. An attribution field in a SOC record that any in-process caller can
+set to any other plugin's name is worse than no field, and it is not covered by the limitation this
+package already discloses — that is about an agent that can run `bash`, whereas this is available to
+a plugin holding nothing but a context.
+
+Behind the forgery is the property the package rests on. Every record it emits today is a function of
+a `session/event` the harness itself appended; the forwarder asserts nothing the harness did not
+already assert. `publish()` ends that. It makes the audit spool writable by anything in the process,
+at a rate bounded by the caller rather than by the harness's own activity — and §12 and §21 fix what
+happens then, because rotation stops rather than deleting, so a flood is an eviction attack on the
+live file's remaining room. Those records would need their own lane and their own chain, on §7's
+terms, which contains the damage without addressing it: nothing consumes this seam today, so the
+lane would ship empty, and the only party with a present reason to call `publish()` is one that wants
+a byte into the SOC's evidence.
+
+**Bounds and OCSF shape were both answerable, and neither rescues it.** A rate cap, a payload byte
+cap, and a serialisability check with the rejects counted into the heartbeat follow the precedent
+`batchSize`, `spoolHighWaterBytes` and `droppedRecords` already set; `publish` returning `void` means
+the counter is the only channel back, which the heartbeat already is. For the record shape, OCSF
+1.9.0 does define a home: `base_event`, `class_uid` 0 and `category_uid` 0, "a generic and concrete
+event ... could be used to log events that are not otherwise defined by the schema", carrying
+`unmapped` and supporting the `record_integrity` profile. Mapping an arbitrary third-party topic onto
+6003 API Activity would misrepresent it; `base_event` would not. It is not free — its required set
+includes `osint` and `cloud`, neither of which this package emits — but it is a real answer to a real
+question, and the decision does not turn on it.
+
+**Decision: do not provide `ctx.inspector`.** Not under a flag, and not with a stand-down check,
+because the check only covers the harmless direction and the harmful one is silent. What would
+change the answer is a harness that provides the key itself, at which point this package's move is
+the opposite one — `inject` it and read what others publish, with the harness owning both the
+identity of the publisher and the lifetime of the seam.
