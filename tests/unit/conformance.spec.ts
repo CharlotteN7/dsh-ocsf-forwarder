@@ -12,7 +12,7 @@ import type { MappableEvent } from '../../src/map/index.ts'
 import { CLASS } from '../../src/ocsf/constants.ts'
 import type { OcsfRecord } from '../../src/ocsf/types.ts'
 import type { Sink } from '../../src/sink/spool.ts'
-import { testConfig, testEnvironment } from './support.ts'
+import { dshOf, testConfig, testEnvironment } from './support.ts'
 
 /** `class_uid` → the attributes that class requires of every one of its records. */
 const REQUIRED: Readonly<Record<number, readonly string[]>> = Object.freeze({
@@ -163,6 +163,8 @@ const OBJECTS: Readonly<Record<string, ObjectDefinition>> = Object.freeze({
   message_context: {
     attributes: {
       ai_role_id: { type: 'number' },
+      // The enum's sibling, which OCSF defines for the value `99 Other` stands in for.
+      ai_role: { type: 'string' },
       application: { type: 'object', object: 'application' },
       prompt_tokens: { type: 'number' },
       completion_tokens: { type: 'number' },
@@ -453,6 +455,41 @@ function emitted(): readonly OcsfRecord[] {
         task: { id: 'k1', revision: 1, subject: 's', description: 'd', status: 'in_progress', ownerId: 'child', blockedBy: [], writeScopes: ['src/**'] },
       },
     },
+    { type: 'system/message', seq: 47, time: 1_047, data: { turn: 1, step: 0, message: { id: 'sys-0', content: [{ type: 'text', text: 'you are' }] } } },
+    { type: 'developer/message', seq: 48, time: 1_048, data: { turn: 1, step: 1, headerSeq: 30, message: { id: 'dev-0', content: [{ type: 'text', text: '+write' }] } } },
+    { type: 'assistant/attempt', seq: 49, time: 1_049, data: { turn: 1, step: 1, stream: [{ kind: 'delta' }] } },
+    { type: 'image/offload', seq: 50, time: 1_050, data: { targets: [{ seq: 18, imageIndexes: [0, 1] }] } },
+    { type: 'subagent/catalog', seq: 51, time: 1_051, data: { version: 0, childId: 'child-2', childCreatedAt: 999, mode: 'continuable', label: 'review the diff' } },
+    { type: 'deliverables/presented', seq: 52, time: 1_052, data: { turn: 1, callId: 'c8', files: [{ path: '/srv/app/out.pdf' }, { path: 'notes.md' }] } },
+    {
+      type: 'tool/call',
+      seq: 53,
+      time: 1_053,
+      data: { turn: 1, step: 1, callId: 'c9', name: 'load_workspace_dependencies', arguments: '{}' },
+    },
+    {
+      type: 'tool/result',
+      seq: 54,
+      time: 1_054,
+      data: {
+        message: {
+          source: { callId: 'c9' },
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              python: '/home/a/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python3',
+              node: '/home/a/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node',
+              pnpm: '/home/a/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.mjs',
+              pythonPackages: '/home/a/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/lib/python3.13/site-packages',
+              nodePackages: '/home/a/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/node_modules',
+              pythonDistributions: { numpy: '2.1.3', pandas: '2.2.3' },
+            }),
+          }],
+        },
+      },
+    },
+    { type: 'tool/ptc-dispatch-start', seq: 55, time: 1_055, data: { rootCallId: 'c10', parentCallId: 'c10', subCallId: 'c10:ptc:1', name: 'read', arguments: { file_path: '/etc/hosts' } } },
+    { type: 'tool/ptc-dispatch', seq: 56, time: 1_056, data: { rootCallId: 'c10', parentCallId: 'c10', subCallId: 'c10:ptc:1', name: 'read', arguments: { file_path: '/etc/hosts' }, isError: false, content: [] } },
   ]
   const session: ForwardableSession = { id: 'S1', firstLiveSeq: 0, seq: events.length, events, header: { cwd: '/srv' } }
   const forwarder = new Forwarder(testEnvironment(config), config, sink, undefined, error => { throw error })
@@ -543,8 +580,19 @@ describe('OCSF 1.9.0 conformance', () => {
     const lifecycle = records.filter(record => record.class_uid === CLASS.applicationLifecycle)
     expect(lifecycle.length).toBeGreaterThan(0)
     for (const record of lifecycle) {
-      expect(record.application?.name).toBe('deepseek-harness')
+      expect(record.application?.name).toBeTypeOf('string')
     }
+  })
+
+  it('names the harness as the application, except where the record is about installing another', () => {
+    const named = records
+      .filter(record => record.class_uid === CLASS.applicationLifecycle)
+      .map(record => [dshOf(record)['event_type'], record.application?.name])
+    // The runtime install is the one record whose subject is not the harness:
+    // defaulting it to `deepseek-harness` would report a Python payload
+    // landing on the host as the agent installing itself.
+    expect(named.filter(([, name]) => name !== 'deepseek-harness'))
+      .toEqual([['tool/call', 'dsh-primary-runtime'], ['tool/result', 'dsh-primary-runtime']])
   })
 
   it('stamps the fleet identity onto every record', () => {

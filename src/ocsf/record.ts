@@ -26,6 +26,7 @@ import type {
   OcsfActor,
   OcsfAiModel,
   OcsfApi,
+  OcsfApplication,
   OcsfDelegation,
   OcsfDevice,
   OcsfFile,
@@ -142,6 +143,12 @@ export interface EventMapping {
   readonly api?: OcsfApi
   readonly httpRequest?: OcsfHttpRequest
   readonly job?: OcsfJob
+  /**
+   * `application` for an Application Lifecycle record whose subject is not the
+   * harness itself — an installed runtime, for one. Ignored on every other
+   * class, which does not define the attribute.
+   */
+  readonly application?: OcsfApplication
   readonly privileges?: readonly string[]
   /**
    * The model this one operation ran on, when it is not the session's route —
@@ -235,9 +242,9 @@ export function buildRecord(
     }),
     // Application Lifecycle constrains `at_least_one: [app, application]`, and
     // `app` is deprecated as of 1.9.0. The application whose lifecycle these
-    // records describe is the harness, not this forwarder.
+    // records describe is the harness, unless the mapper named another one.
     application: mapping.classUid === CLASS.applicationLifecycle
-      ? { name: AGENT_NAME, uid: config.fleet.installUid }
+      ? mapping.application ?? { name: AGENT_NAME, uid: config.fleet.installUid }
       : undefined,
     // Required by the declared `cloud` and `osint` profiles and meaningless for
     // a host agent; emitted so records validate rather than fail ingestion.

@@ -353,8 +353,12 @@ export const DEFAULT_DROPPED_EVENT_TYPES: readonly string[] = [
   // Model-written restatements of the user's prompt, and the prompt itself.
   'session/title',
   'session/title-llm-request',
-  // A free-text human remark about the session: no security value, high privacy cost.
+  // Free-text human remarks: no security value, high privacy cost. The put
+  // carries the rater's own `note`; the delete names only the message whose
+  // rating went away, and is dropped with it because it says nothing on its own.
   'feedback/record',
+  'feedback/message-put',
+  'feedback/message-delete',
   // UI state made of user and model task text.
   'todo/write',
 ]

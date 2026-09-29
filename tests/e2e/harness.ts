@@ -15,9 +15,9 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
-  startMockLlmServer,
+  startMockLlmServer as devMockLlmServer,
   type MockLlmBehavior,
   type MockLlmRequestRecord,
   type MockLlmServer,
@@ -64,6 +64,34 @@ const DSH_CLI = process.env.DSH_CLI
 
 /** Directory the CLI subprocess starts in; the agent records it as the session cwd. */
 const DSH_CWD = DSH_CLI === undefined ? DSH_REPO : dirname(DSH_CLI)
+
+/**
+ * The mock LLM server, resolved beside the CLI under test when one is named.
+ *
+ * The mock speaks the wire protocol of its own release, and that protocol
+ * moved inside the supported peer range: through `0.1.5` the shipped DeepSeek
+ * adapter posts to `/chat/completions` and the mock serves only that path,
+ * while from `0.1.7` both ends use `/v1/messages`. A mock one line away from
+ * the CLI answers 404 to every request, which surfaces as `HTTP_404` from the
+ * agent rather than as a version mismatch. So when `DSH_CLI` names an
+ * installed CLI, the mock is taken from that same install; the devDependency
+ * is the fallback for a checkout run, where it matches by construction.
+ * @returns the `startMockLlmServer` of the matching release.
+ */
+async function resolveMockServer(): Promise<typeof devMockLlmServer> {
+  if (DSH_CLI === undefined) return devMockLlmServer
+  const fromCli = createRequire(DSH_CLI)
+  let entry: string
+  try {
+    entry = fromCli.resolve('@deepseek-ai/dsh-llm-mock-server')
+  } catch {
+    // Not installed beside the CLI: the caller gets the devDependency, and a
+    // protocol mismatch shows up as HTTP_404 with this message to explain it.
+    return devMockLlmServer
+  }
+  const loaded = await import(pathToFileURL(entry).href) as { startMockLlmServer: typeof devMockLlmServer }
+  return loaded.startMockLlmServer
+}
 
 /** Command and leading arguments that boot the CLI in the selected mode. */
 function launchArgv(): readonly string[] {
@@ -320,6 +348,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     restore = options.prepareRun?.({ home, spoolPath })
 
+    const startMockLlmServer = await resolveMockServer()
     server = await startMockLlmServer({
       sequence: options.sequence,
       apiKey: 'mock-key',

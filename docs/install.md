@@ -30,13 +30,23 @@ every one of these:
 |---|---|
 | `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.0-rc.8` | `0.1.0-rc.8` is where the session vocabulary grew the four `team/*` types. |
 | `0.1.1-rc.2` | The `latest` dist-tag of the `@deepseek-ai/dsh` CLI. |
-| `0.1.2-alpha.5` | The line where `Session.events` became `Session.snapshotEvents()` and `header.seedLength` became `Session.inheritedEventCount`. This plugin reads whichever the resolved version has. It is also the first line whose vocabulary carries all 51 event types, `session-log-deepseek/delivery-accepted` among them. |
-| `0.1.2-rc.1` | The newest release the peer ranges admit, and what the devDependencies and the event table are checked against. |
+| `0.1.2-alpha.5` | The line where `Session.events` became `Session.snapshotEvents()` and `header.seedLength` became `Session.inheritedEventCount`. This plugin reads whichever the resolved version has. It is also the first line whose vocabulary carries all 51 of the types that line knows, `session-log-deepseek/delivery-accepted` among them. |
+| `0.1.2-rc.1` | The last release before the session format migrated v3 to v4. |
+| `0.1.5-rc.3` | npm's `latest`. 56 event types: five added, `tool/code-dispatch{,-start}` renamed to `tool/ptc-dispatch{,-start}`, and `assistant/chunk` replaced by the different `assistant/attempt`. |
+| `0.1.7-rc.2` | npm's `next`, and what the devDependencies and the event table are checked against. 59 event types. The line where `tool/result`'s `isError` moved onto the message, and where `session-log-deepseek` began uploading by default. |
+
+**The `0.1.0`, `0.1.1` and `0.1.2` rows are claimed and not currently demonstrated.** Every
+`0.1.2-rc.1` install we could build — the CI recipe, the default pnpm linker, and a byte copy of a
+cache built weeks earlier — dies during boot with `dsh: user patch-layer watching requires the
+Cordis HMR service`, before any plugin loads. The same failure reproduces against this package's
+own `0.8.0` release, so it is not this plugin, and pinning `@deepseek-ai/cordis` and
+`cordis-plugin-hmr` back to the versions that line shipped with does not change it. The rows stay
+because a diagnosed failure is a better reason to drop a supported line than an undiagnosed one.
 
 **Peer ranges.** `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-session-telemetry` are
 
 ```
-^0.1.0-rc.6 || ~0.1.1-rc.0
+^0.1.0-rc.6 || ~0.1.1-rc.0 || ~0.1.2-alpha.0 || ~0.1.5-alpha.0 || ~0.1.7-alpha.0
 ```
 
 which is longer than it looks like it should be because node-semver lets a prerelease satisfy a
@@ -52,9 +62,9 @@ npm error peer @deepseek-ai/dsh-session@"^0.1.0-rc.6" from dsh-ocsf-forwarder@0.
 ```
 
 **What the range cannot cover.** One comparator set per prerelease patch tuple is the only way to
-express this, so a future `0.1.3-rc.1` is *not* admitted and needs a set of its own. That is
-deliberate: each new prerelease line is untested until someone runs the suite against it, and
-widening the range is where that gets noticed.
+express this, so `0.1.3-alpha.2` and the whole `0.1.6` line are *not* admitted even though both
+sit between admitted lines. That is deliberate: each prerelease line is untested until someone
+runs the suite against it, and widening the range is where that gets noticed.
 
 `@deepseek-ai/cordis` is `^4.0.1` rather than exactly `4.0.1`. The exact pin was there so the
 service graph every registration goes through is one graph — but a peer range does not install

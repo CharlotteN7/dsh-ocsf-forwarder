@@ -203,3 +203,92 @@ quarantined batch is reported through the plugin logger, naming the destination 
 Which statuses fall where is the transport's decision: OTLP retries 5xx, timeouts, connection
 failures and 408/425/429 and refuses any other 4xx; Splunk's reading is in
 [Shipping to a SIEM](shipping.md#splunk-http-event-collector) and differs on 401 and 403.
+
+## What a Desktop install does that this plugin cannot see
+
+DeepSeek Harness Desktop is an Electron shell around the Web application. An Electron
+`RunAsNode` child runs the Host, and that is where plugins — including this one — load. The
+Electron **main process** is a different process, and nothing here runs in it. Everything below
+was read from the harness source at `dsh-v0.1.7-rc.2`; `apps/desktop` and `apps/desktop-host` are
+`private: true` and never published, so a checkout at that tag is the only way to see them.
+**None of it was executed**: there is no packaged Electron build here.
+
+The one measurement that covers all of it: `session.append` does not appear anywhere in
+`apps/desktop/src` or `apps/desktop-host/src`. No Desktop-specific behaviour produces a session
+event, so the firehose this plugin subscribes to carries none of it.
+
+### Update installs — not observable, and this is the consequential one
+
+Desktop auto-updates: it polls a fixed feed, downloads, verifies SHA-512, and hands the process
+exit to an installer. A security product that cannot tell a SOC "this host's agent binary changed
+version" is missing the most consequential event on the box, and this one cannot.
+
+`DesktopUpdateCoordinator` (`apps/desktop/src/update-coordinator.ts`) owns the whole state
+machine — check, available, download progress, verify, ready, `quitAndInstall` — on top of
+`electron-updater`'s `autoUpdater`, which is an Electron-main-only API. Its state reaches the
+renderer over `dsh-desktop:updates-presentation` and never the Host.
+
+The Host *is* involved in an install, and what it receives is the limit:
+
+| Host IPC message | Payload |
+|---|---|
+| `shutdown` | nothing |
+| `quit-inspection` | `requestId` |
+| `update-tasks` | `requestId`, `action` ∈ `inspect` \| `lock` \| `unlock` |
+
+That is the complete inbound vocabulary of `apps/desktop-host/src/index.ts`. There is no version,
+no artifact identity, and no way to tell an update lock from any other lock. The handler,
+`installDesktopUpdateTaskControl` (`apps/desktop-host/src/update-tasks.ts`, 35 lines from its `export` to the end of the file), registers a
+`connection/request` middleware that answers 503 while locked and returns a boolean; it calls no
+`ctx.emit`, provides no service, and appends no event.
+
+So there is **no mapping to invent** here, and none is emitted. What a deployment can do instead:
+
+- The **installed** version is readable in-process — `getDshRuntimeVersion()` from
+  `@deepseek-ai/dsh-app-boot`, and the signed `desktop-runtime.json` whose directory the Host
+  receives as `process.argv[2]`. That answers "what am I running", not "it just changed", and this
+  plugin does not read either: a version that only ever reports itself is already in
+  `metadata.product` for this package and in `ai_agent.version` for the agent.
+- The **update version** is main-process-owned and never crosses IPC; `update-coordinator.ts`
+  says so in its own comment.
+- Watch the **shell**, not the agent: the installer's own artifacts — the Windows
+  `%LOCALAPPDATA%\…-updater\installer-logs\` reports, the macOS packaging records — are files a
+  host agent already collects.
+
+### The embedded browser — not observable
+
+Desktop's embedded Platform view keys a persistent `WebContentsView` partition by a SHA-256 of
+the Platform origin and the account id, clears cookies, IndexedDB, Cache Storage, service workers
+and HTTP auth **before** each document loads, and destroys the document on close
+(`apps/desktop/src/platform-view.ts`). Sidebar Browser `<webview>` guests get a lease and a
+process-lifetime partition (`apps/desktop/src/browser-guests.ts`). All of it is Electron main; the
+Host companion plugin for the sidebar browser has an empty `apply()`. The IPC channels
+(`dsh-desktop:browser-acquire`, `dsh-desktop:browser-open-requested`,
+`dsh-platform:bootstrap`, …) run main ↔ renderer and are not on the Host's protocol at all.
+
+Do not confuse this with `packages/browser-use`: the Stagehand and MCP browser **tools** a model
+calls (`stagehand_navigate`, `mcp__playwright-mcp__*`, …) go through `ctx.tools`, so they produce
+ordinary `tool/call` / `tool/result` events and are mapped like any other tool. That is a
+different feature driving a different browser.
+
+### Account sign-in and sign-out — observable, and not mapped here
+
+This is the one Desktop-adjacent event that a Host plugin *can* see, and OCSF has
+**Authentication (3002)** for exactly it. It is not implemented in this release, and the reason is
+scope rather than feasibility — see [ADR §51](../ADR.md). The evidence a later change starts from:
+
+- Sign-in runs in the Host: `PlatformAccount` in
+  `packages/credentials/deepseek-account-platform/src/index.ts` mints the PKCE verifier and state,
+  registers a temporary `/oauth/callback` route on the Host's own web server, exchanges the code,
+  and commits the grant under the credential key `deepseek-account-platform:default`.
+- There is **no** `deepseek-account/signed-in` event. The module declares three:
+  `deepseek-account/signed-out`, `deepseek-account/session-expired`,
+  `deepseek-account/model-sign-in-required`. A successful sign-in is observable only indirectly,
+  through `authorization/settled` and `credentials/record-updated` on that key.
+- Sign-out **is** direct: `ctx.emit('deepseek-account/signed-out')` fires from the user-initiated
+  `signOut()` and from the credential-expiry path.
+- State is pollable: a plugin that injects `deepseekAccount` gets `getState()` and a `watch()`
+  async iterable.
+
+The asymmetry is worth stating plainly, because it is what a mapping would have to live with: the
+sign-out is a first-class event and the sign-in is an inference from a generic credential write.

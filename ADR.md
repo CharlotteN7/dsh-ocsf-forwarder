@@ -1243,3 +1243,213 @@ because the check only covers the harmless direction and the harmful one is sile
 change the answer is a harness that provides the key itself, at which point this package's move is
 the opposite one — `inject` it and read what others publish, with the harness owning both the
 identity of the publisher and the lifetime of the seam.
+
+---
+
+## 51. The vocabulary moved three ways at once, and Desktop is not in it
+
+**Context.** §47 moved the devDependencies to `0.1.2-rc.1` and the table to 51 event types. npm's
+`latest` for `@deepseek-ai/dsh` is now `0.1.5-rc.3` and `next` is `0.1.7-rc.2`, and the peer range
+admitted neither. Counted from the published `@deepseek-ai/dsh-session` packages rather than from
+a changelog, `KNOWN_SESSION_EVENT_TYPES` is 51 at `0.1.2-rc.1`, **56** at `0.1.5-rc.3` and **59**
+at `0.1.7-rc.2`, which matches the read-only checkout at `dsh-v0.1.7-rc.2` exactly.
+
+The diff is three different kinds of change, and only the first is the kind §47 handled.
+
+- **Eight types added**: `deliverables/presented`, `developer/message`, `feedback/message-delete`,
+  `feedback/message-put`, `image/offload`, `subagent/catalog`, `system/message`,
+  `workspace/changes`.
+- **Two renamed with their payloads intact**: `tool/code-dispatch{,-start}` →
+  `tool/ptc-dispatch{,-start}`, retired by the session format's v3-to-v4 migration
+  (`packages/session/session-format-v3-to-v4/src/retired-syntax.ts`).
+- **One replaced by a different event under a new name**: `assistant/chunk` left and
+  `assistant/attempt` arrived. They are not the same thing. The first was a token-level stream
+  delta, dropped by policy as pure content at the highest volume in the log. The second is
+  appended once per model attempt **that committed no surface message** — a failure, a retry, a
+  cancellation, a stream error (`packages/core/agent-loop/src/agent.ts`).
+
+**The rename was the expensive one.** A dispatcher `case` for a type nobody emits is dead code and
+costs nothing; a dispatcher missing a `case` for a type that *is* emitted produces a record. From
+the `0.1.5` line on, every sub-call inside a `run_code` program was taking `mapGeneric` — API
+Activity 6003 / `99 Other`, no tool name, no class, no correlation to the parent call — and
+nothing failed, because the fallback's whole job is not to fail. The dispatcher now routes both
+names to one mapper: the peer range admits builds on either side of the migration, a resumed log
+can carry events written by either, and the payload fields are unchanged.
+
+**Seven of the eight additions took a mapper; one row got the truth instead.**
+
+- **`system/message` → Application Lifecycle 6002 / `8 Update`.** The rendered system prompt as it
+  stands on the model-visible surface: the same category of fact `request/header` already carries
+  a digest of, so it takes the same class and the same redaction. `system_prompt_empty`
+  distinguishes a cleared prompt from a changed one, because an empty rendering clears every
+  active system node and that is a different event from a prompt that hashes to something new.
+- **`developer/message` → 6002 / `8 Update`, `severity_id: 2`.** The harness documents these as
+  tool additions and removals, so a mid-session one widens what a single prompt can reach; it is
+  graded on `model/selection`'s reasoning rather than as bookkeeping. `message_context.ai_role_id`
+  is `99` with the sibling `ai_role: developer`, because OCSF 1.9.0's `ai_role_id` enum has
+  `User`, `Assistant`, `Tool`, `Agent`, `Orchestrator`, `Retriever` and `Other` — and no developer
+  or system member. Filling `99` and naming the role in its declared sibling is what the schema
+  provides for exactly this; inventing a member is not.
+- **`assistant/attempt` → API Activity 6003 / `2 Read`, `status_id: 2`.** The embedded `stream` is
+  the model's own partial output and is never read; `stream_records` counts it, which separates an
+  attempt that produced nothing from one cut off part-way.
+- **`image/offload` → 6003 / `4 Delete`.** Model-visible content permanently removed from later
+  requests while the log keeps it: `compaction/prune`'s shape, so it takes the same activity, and
+  the surface `seq`s it edited are recorded on the same reasoning as that event's shadowed range.
+- **`subagent/catalog` → 6002 / `3 Start`.** The **third** event type that names a child session
+  by id, so §47's "the second" is no longer true either. `label` is the delegating call's own
+  model-written `description`, so it is digested.
+- **`deliverables/presented` → File System Activity 1001 / `2 Read`.** The paths a turn handed the
+  user, verbatim on `file.path`'s rule. The class requires one `file`, the event can name several:
+  the first fills the required object, all of them are in `unmapped.dsh.presented_paths`, and each
+  contributes its own observable. A payload with no readable path produces **no record**.
+- **`feedback/message-put` and `feedback/message-delete` are dropped by default,** on
+  `feedback/record`'s reasoning: the put carries the rater's free-text `note`, and the delete says
+  nothing without the put it removes.
+- **`workspace/changes` keeps the generic fallback, and the row says so.** Its payload is
+  `{ turn }` and nothing else; the changed-file summary stays on the Host and is served by
+  `ctx.workspaceChanges.summary` while the session lives. A dedicated mapper would read exactly
+  the field the fallback already reads, which is a mapper with a hollow centre. Reading the real
+  summary means injecting a live Host service and racing the session's lifetime, which is a
+  different decision from this one.
+
+**The drop list and the table are no longer the same set, and the test that said they were is
+fixed rather than satisfied.** `assistant/chunk` must stay dropped — an older harness in the peer
+range still emits it at the highest volume in the log — and must have no row, because the table is
+the newest admitted vocabulary. The check now compares the table's classless rows against the
+*intersection* of the drop list and that vocabulary, and a second check catches a typo in the drop
+list by failing on any dropped name the vocabulary has never heard of, with retired names listed
+explicitly.
+
+### `load_workspace_dependencies` installs a runtime, and said nothing
+
+Desktop carries its own Python, Node and pnpm. `load_workspace_dependencies` unpacks that payload
+under `$DSH_HOME/dsh-runtimes/dsh-primary-runtime` on first use — a staged `cp` and a directory
+rename in `installPrimaryRuntime` — and **appends no session event of its own**; `session.append`
+does not appear anywhere in `packages/skill/tool-workspace-dependencies`. The ordinary
+`tool/call` / `tool/result` pair is the only trace an installed interpreter leaves in the log, and
+under `everything else → API Activity` that pair said an API-ish tool ran. The tool declares
+`parameters: {}`, so there was no argument to read either.
+
+It is now its own `ToolClass` mapping to **Application Lifecycle 6002 / `1 Install`** — which is
+what OCSF names the activity — and the record carries its own `application` object rather than the
+harness one every other 6002 record defaults to. Reporting a Python payload landing on the host as
+`deepseek-harness` installing itself would be worse than the API read it replaced.
+
+The report is read from the **result**, because that is where it is: the tool declares an output
+schema and renders its value as one JSON text block, so the interpreter paths and the bundled
+distribution map are in the log verbatim. Paths go in on `file.path`'s rule and each executable
+also contributes an observable; the distribution name→version map is the software inventory a SOC
+joins against advisories. A failed call's text is a diagnostic rather than a report and nothing is
+read from it. `runtime-install` is deliberately **outside** the configurable `toolClasses` set,
+with `delegation-external`: both change what the mapper reads, not only how a call is labelled.
+
+### `isError` moved, and every failed tool call became a success
+
+Found by running the approval end-to-end test against `0.1.7-rc.2` and reading the log it
+produced. Through the `0.1.5` line a `tool/result` message was a user-role message whose single
+content block carried `toolCallId` and `isError`; from `0.1.7` it is a tool-role message carrying
+both at the top of the message (`packages/llm/llm/src/message.ts`, `createToolResultMessage`).
+
+`resultIsError` read only `data.message.content[0].isError`. On a `0.1.7` harness that is
+`undefined`, so **every failed tool call was recorded with `status_id: 1` and `is_error: false`** —
+including the refused sandbox escalation the approval test exists to check, which a SOC would have
+read as an escalation that succeeded. Both placements are now read and either one saying so is a
+failure; `resultCallId` gained the message-level `toolCallId` for the same reason. This is the
+single worst thing in this change set, and nothing local caught it: the unit fixtures were written
+against the old shape, so they kept passing.
+
+### Versions, and one dependency that could not move with them
+
+The devDependencies and the `pnpm-workspace.yaml` overrides moved to `0.1.7-rc.2` together, and
+the peer ranges gained `~0.1.5-alpha.0 || ~0.1.7-alpha.0`. node-semver's prerelease rule is why
+each line needs its own comparator: `~0.1.2-alpha.0` desugars to `>=0.1.2-alpha.0 <0.2.0`, and a
+comparator carrying a prerelease admits prereleases only at its own `[major, minor, patch]`, so
+`0.1.5-rc.3` was outside the old range. `0.1.3` and `0.1.6` are deliberately **still** outside it:
+nothing here has been run against them, and a range is a promise about everything in it.
+
+`@deepseek-ai/schemastery` is the one thing that did not move. The `0.1.7` packages ask for
+`~3.18.4`, and two copies in one program make `z.object({...})` unassignable to `z<Config>` — the
+3.18.4 `Schema` carries a third type parameter and a `Volatile` output. Adopting 3.18.4 fixes the
+typecheck and **breaks the plugin at runtime on the `0.1.2` line**, measured rather than reasoned:
+boot fails with `The requested module '@deepseek-ai/cosmokit' does not provide an export named
+'createVolatile'`, and the whole plugin tree refuses to load. So the runtime dependency stays at
+3.18.1 — which imports nothing cosmokit does not have on any supported line — and a
+`pnpm-workspace.yaml` override holds the development graph to one copy of it.
+
+### The mock LLM server has to match the CLI under test
+
+The end-to-end harness boots a real `dsh` against `@deepseek-ai/dsh-llm-mock-server`, and that
+mock serves exactly one path: `/chat/completions` through `0.1.5-rc.3`, `/v1/messages` from
+`0.1.7-rc.2`. A mock one line away from the CLI answers 404 to every request, which surfaces as
+`dsh: HTTP_404` from the agent and looks nothing like a version mismatch. The harness now resolves
+the mock from the CLI's own install whenever `DSH_CLI` names one, falling back to the
+devDependency for a checkout run where it matches by construction, and the CI matrix installs both
+at the same version in one step.
+
+**What is proven, and against what.** The end-to-end suite passes against `0.1.5-rc.3` and
+`0.1.7-rc.2` (14 tests, 6 files, each). Three of its assertions had to change, and each change is
+the harness moving rather than a test being bent: one asserted `assistant/chunk` was in the
+session log, which is now a retired type, and reads the drop list against the run's own log
+instead; one asserted the session-log upload row is off by default, which stopped being true (see
+below), and now asserts the correspondence that is actually ours — a record exists exactly when an
+upload did; one is the `isError` bug above, which was a real defect.
+
+**What is not proven.** The `0.1.0`, `0.1.1` and `0.1.2` lines **could not be executed at all** in
+this environment, at this change or at `0.8.0`. Three independently built `0.1.2-rc.1` installs —
+the CI recipe with `nodeLinker: hoisted` and `autoInstallPeers`, the default isolated linker, and
+a byte copy of a cache built weeks ago — all die during boot with `dsh: user patch-layer watching
+requires the Cordis HMR service`, before any plugin loads. Pinning `@deepseek-ai/cordis` to 4.0.2
+and `cordis-plugin-hmr` to 1.0.17 does not change it. The same failure reproduces with this
+repository stashed back to `0.8.0`, so it is neither caused by this change nor newly introduced by
+it — but it does mean the three oldest lines the peer range promises are now **claimed and not
+demonstrated**, and that is recorded here rather than papered over by narrowing the range on the
+strength of a failure nobody has diagnosed.
+
+### Desktop: one mapping, three limitations
+
+`apps/desktop` and `apps/desktop-host` are `private: true` and never reach npm, so the read-only
+checkout at `dsh-v0.1.7-rc.2` is the only way to read them, and nothing here was executed against a
+packaged Electron build. One measurement covers the shape of the answer: **`session.append`
+appears nowhere in `apps/desktop/src` or `apps/desktop-host/src`.**
+
+- **Update installs are not observable from a plugin.** The whole state machine is
+  `DesktopUpdateCoordinator` in the Electron main process, on `electron-updater`'s main-only
+  `autoUpdater`. The Host's complete inbound IPC vocabulary is `shutdown`, `quit-inspection`, and
+  `update-tasks` with `action` ∈ `inspect | lock | unlock`; there is no version in it and no way
+  to tell an update lock from any other. The Host-side handler emits nothing, provides nothing,
+  and appends nothing. **No mapping is emitted**, and `docs/operations.md` says so with the
+  citations. This is the one a SOC will miss most, which is exactly why inventing a record for it
+  would be worse than the gap.
+- **The embedded browser is not observable.** Partition creation, the pre-load storage clear, and
+  document destruction are all Electron main (`platform-view.ts`, `browser-guests.ts`); the Host
+  companion plugin for the sidebar browser has an empty `apply()`. The browser **tools**
+  (`stagehand_*`, `mcp__playwright-mcp__*`) are a different feature and are mapped like any other
+  tool, which the page says explicitly so the two are not confused.
+- **Account sign-in and sign-out are observable, and are not mapped in this release.** Sign-out
+  emits `deepseek-account/signed-out` from the Host; sign-in has no event of its own and is
+  visible only through `authorization/settled` and `credentials/record-updated` on the key
+  `deepseek-account-platform:default`; `ctx.deepseekAccount` exposes `getState()` and `watch()`.
+  OCSF **Authentication (3002)** is the right class and this is a real gap. It is not built here
+  because it is a second subscription surface — Cordis events rather than the session firehose,
+  records with no session to attribute them to, a new class in the conformance tables — and
+  because the sign-in half would be an inference from a generic credential write rather than an
+  observation. Shipping the sign-out and inferring the sign-in is a design decision with a real
+  false-positive cost, and it is written up rather than guessed at.
+
+### The session log now leaves the host by default
+
+Found while fixing the end-to-end test that asserted the opposite. `@deepseek-ai/dsh-session-log-deepseek`
+is a row of the base bundle on every line in the peer range, and its `enabled` default is `false`
+in the published `0.1.2-rc.1` and `0.1.5-rc.3` builds and **`true`** in `0.1.7-rc.2`. Enabled, it
+attaches the session's own canonical event envelopes — prompts, tool arguments, tool output, model
+completions — to every official DeepSeek request.
+
+It is documented upstream, in that package's own README and config JSDoc, so it is a deliberate
+product decision rather than a defect. What it changes here is what this package's pages say: the
+README described the record as something you get "with `session-log-deepseek` enabled", which read
+as opt-in and is now backwards. On a current harness the record is what a normal host looks like,
+and its **absence** is the thing an operator who set `enabled: false` should be alerting on.
+`disclosures/findings/draft-session-log-upload-default-flip.md` covers the upgrade path, which is
+the part that is not obviously fine: an install moving `0.1.5 → 0.1.7` starts uploading without
+anyone changing a setting.

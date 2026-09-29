@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_DROPPED_EVENT_TYPES } from '../../src/config.ts'
 import { dshOf, isHeartbeat, runAgent, type OcsfLine } from './harness.ts'
 
 /** Records of one event type, in spool order. */
@@ -81,9 +82,15 @@ describe('a real agent run, normalised to OCSF', () => {
     expect(ofType(result.ocsfRecords, 'turn/end')[0]?.status_id).toBe(1)
     expect(call.ai_model).toMatchObject({ ai_provider: expect.any(String), name: expect.any(String) })
 
-    // Dropped by policy: the stream deltas never reach the spool.
-    expect(ofType(result.ocsfRecords, 'assistant/chunk')).toHaveLength(0)
-    expect(result.sessionLog.some(row => row['type'] === 'assistant/chunk')).toBe(true)
+    // Dropped by policy: a type on the drop list that this harness did write
+    // is in the log and not in the spool. Which types those are moves with the
+    // harness — `assistant/chunk` is gone from the `0.1.7` vocabulary — so the
+    // run's own log decides what to check rather than a hard-coded name, and
+    // the count assertion keeps the check from passing on an empty set.
+    const droppedInLog = [...DEFAULT_DROPPED_EVENT_TYPES]
+      .filter(type => result.sessionLog.some(row => row['type'] === type))
+    expect(droppedInLog.length).toBeGreaterThan(0)
+    for (const type of droppedInLog) expect(ofType(result.ocsfRecords, type)).toHaveLength(0)
   }, 120_000)
 
   it('records a turn with no tool call and leaves the agent output alone', async () => {

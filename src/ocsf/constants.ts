@@ -111,6 +111,8 @@ export const AI_ROLE = {
   assistant: 2,
   tool: 3,
   agent: 4,
+  /** The enum's `Other`; the `ai_role` sibling carries the value it does not spell. */
+  other: 99,
 } as const
 
 /** `user.type_id` for a human account. */

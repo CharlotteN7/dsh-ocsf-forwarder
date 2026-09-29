@@ -17,6 +17,7 @@ import {
   mapAuthorizationState,
   mapSubagentModelPolicy,
 } from './authorization.ts'
+import { mapPresentedDeliverables } from './deliverables.ts'
 import { mapSessionLogDelivery } from './egress.ts'
 import {
   mapAssistantMessage,
@@ -30,6 +31,7 @@ import {
   mapScheduleChange,
   mapStepEnd,
   mapStepStart,
+  mapSubagentCatalog,
   mapSubagentDescriptor,
   mapTurnEnd,
   mapTurnStart,
@@ -48,14 +50,20 @@ import {
   mapPlanMode,
 } from './interaction.ts'
 import {
+  mapAssistantAttempt,
+  mapDeveloperMessage,
+  mapImageOffload,
+  mapSystemMessage,
+} from './surface.ts'
+import {
   mapTeamMember,
   mapTeamMessageDelivered,
   mapTeamMessageQueued,
   mapTeamTask,
 } from './team.ts'
 import {
-  mapCodeDispatch,
-  mapCodeDispatchStart,
+  mapPtcDispatch,
+  mapPtcDispatchStart,
   mapToolCall,
   mapToolResult,
 } from './tool-events.ts'
@@ -87,8 +95,12 @@ export function mapEvent(
   switch (event.type) {
     case 'tool/call': return mapToolCall(sessionId, event, state, config)
     case 'tool/result': return mapToolResult(sessionId, event, state, config)
-    case 'tool/code-dispatch-start': return mapCodeDispatchStart(sessionId, event, state, config)
-    case 'tool/code-dispatch': return mapCodeDispatch(sessionId, event, state, config)
+    // The session format's v3-to-v4 migration renamed these two; the peer
+    // range admits builds on both sides of it, and the payload is the same.
+    case 'tool/ptc-dispatch-start':
+    case 'tool/code-dispatch-start': return mapPtcDispatchStart(sessionId, event, state, config)
+    case 'tool/ptc-dispatch':
+    case 'tool/code-dispatch': return mapPtcDispatch(sessionId, event, state, config)
     case 'approval/asked': return mapApprovalAsked(sessionId, event, state, config)
     case 'approval/decided': return mapApprovalDecided(sessionId, event, state)
     case 'approval/policy':
@@ -100,13 +112,19 @@ export function mapEvent(
     case 'step/start': return mapStepStart(sessionId, event, state)
     case 'step/end': return mapStepEnd(sessionId, event, state)
     case 'assistant/message': return mapAssistantMessage(sessionId, event, config)
+    case 'assistant/attempt': return mapAssistantAttempt(sessionId, event)
     case 'user/message': return mapUserMessage(event, config)
+    case 'system/message': return mapSystemMessage(event, config)
+    case 'developer/message': return mapDeveloperMessage(event, config)
+    case 'image/offload': return mapImageOffload(event)
+    case 'deliverables/presented': return mapPresentedDeliverables(sessionId, event)
     case 'request/context': return mapRequestContext(event, state)
     case 'model/selection': return mapModelSelection(event)
     case 'request/header': return mapRequestHeader(event, config)
     case 'hook/invoked': return mapHookInvoked(sessionId, event)
     case 'hook/result': return mapHookResult(sessionId, event, config)
     case 'subagent/descriptor': return mapSubagentDescriptor(sessionId, event)
+    case 'subagent/catalog': return mapSubagentCatalog(sessionId, event, config)
     case 'tool-workflow/run-start':
     case 'tool-workflow/run-end':
     case 'tool-workflow/agent-start':

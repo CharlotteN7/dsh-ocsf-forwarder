@@ -2,10 +2,13 @@
  * Mapping of the four tool events, and the correlation that joins each call to
  * its result.
  *
- * A `tool/result` carries no top-level call id: it is read from
- * `data.message.source.callId`, with `data.message.content[0].toolCallId` as
- * the fallback. Both are checked because either can be the only one present in
- * a replayed log written by a different build.
+ * A `tool/result` carries no top-level call id, and the message it does carry
+ * changed shape inside the supported peer range. Through the `0.1.5` line the
+ * result message was a user-role message whose single content block held
+ * `toolCallId` and `isError`; from `0.1.7` it is a tool-role message carrying
+ * both at the top of the message. Every reader here checks both placements,
+ * because the range admits builds on either side and a resumed log can carry
+ * events written by either.
  * @module map/tool-events
  */
 
@@ -21,7 +24,9 @@ import {
   classifyTool,
   ocsfClassOf,
   parseArguments,
+  RUNTIME_INSTALL_APPLICATION,
   parseMcpToolName,
+  runtimeInstallDetails,
   toolDetails,
   type ParsedArguments,
   type ToolClass,
@@ -41,7 +46,7 @@ export function callCorrelationUid(sessionId: string, callId: string): string {
   return `${sessionId}:${callId}`
 }
 
-/** Arguments of a code-mode sub-dispatch arrive already parsed, not as a JSON string. */
+/** Arguments of a PTC-mode sub-dispatch arrive already parsed, not as a JSON string. */
 function argumentsOf(data: unknown): ParsedArguments {
   const raw = readRecord(data)?.['arguments']
   if (typeof raw === 'string') return parseArguments(raw)
@@ -153,29 +158,44 @@ export function mapToolCall(
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
     ...api === undefined ? {} : { api },
+    ...toolClass !== 'runtime-install' ? {} : { application: RUNTIME_INSTALL_APPLICATION },
     observables: details.observables,
     attributes: { ...details.attributes, turn, step, call_id: callId, phase: 'invoke' },
   }
 }
 
-/** Read a tool result's call id from either of the two places it lives. */
+/** Read a tool result's call id from any of the three places it lives. */
 export function resultCallId(data: unknown): string | undefined {
   const message = readNested(data, 'message')
   const fromSource = readString(readNested(message, 'source'), 'callId')
   if (fromSource !== undefined) return fromSource
+  const fromMessage = readString(message, 'toolCallId')
+  if (fromMessage !== undefined) return fromMessage
   const content = readRecord(message)?.['content']
   const first = Array.isArray(content) ? content[0] : undefined
   return readString(first, 'toolCallId')
 }
 
-/** Whether a tool result reported failure. */
+/**
+ * Whether a tool result reported failure.
+ *
+ * `isError` moved from the result block to the message itself between the
+ * `0.1.5` and `0.1.7` lines, both of which the peer range admits. Reading only
+ * the older placement graded every failed tool call on a newer harness a
+ * success — a refused sandbox escalation among them — so both are read and
+ * either one saying so is a failure.
+ * @param data - the `tool/result` payload.
+ * @returns true when the invocation failed.
+ */
 function resultIsError(data: unknown): boolean {
-  const content = readRecord(readNested(data, 'message'))?.['content']
+  const message = readNested(data, 'message')
+  if (readRecord(message)?.['isError'] === true) return true
+  const content = readRecord(message)?.['content']
   const first = Array.isArray(content) ? content[0] : undefined
   return readRecord(first)?.['isError'] === true
 }
 
-/** The closed-call fields shared by `tool/result` and `tool/code-dispatch`. */
+/** The closed-call fields shared by `tool/result` and `tool/ptc-dispatch`. */
 function settle(
   sessionId: string,
   event: { seq: number; time: number; data: unknown },
@@ -192,6 +212,9 @@ function settle(
   const error = readNested(event.data, 'error')
   const api = apiOf(toolClass, name)
   const correlationUid = callCorrelationUid(sessionId, callId)
+  // A runtime install reports what it installed in its result rather than in
+  // its arguments, which the tool declares as empty.
+  const install = toolClass === 'runtime-install' ? runtimeInstallDetails(event.data, isError) : undefined
   return {
     classUid,
     activityId,
@@ -202,6 +225,8 @@ function settle(
     correlationUid,
     ...call === undefined ? {} : { startTime: call.time, duration: Math.max(0, event.time - call.time) },
     ...api === undefined ? {} : { api },
+    ...install?.application === undefined ? {} : { application: install.application },
+    ...install === undefined ? {} : { observables: install.observables },
     ...subjectOf(toolClass, name, call, correlationUid),
     attributes: {
       tool: name,
@@ -213,6 +238,7 @@ function settle(
       step: readNumber(event.data, 'step') ?? call?.step ?? 0,
       ...identityAttributes(toolClass, name, call?.delegationProvider ?? config.delegationTools[name]),
       ...call === undefined ? { unpaired: true } : { call_seq: call.seq },
+      ...install?.attributes,
       ...extra,
     },
   }
@@ -239,15 +265,20 @@ export function mapToolResult(
 }
 
 /**
- * Map a `tool/code-dispatch-start`: one tool call issued from inside a
+ * Map a `tool/ptc-dispatch-start`: one tool call issued from inside a
  * `run_code` program.
+ *
+ * The harness renamed this type from `tool/code-dispatch-start` in the
+ * session format's v3-to-v4 migration; the dispatcher routes both names here
+ * because the peer range admits builds on either side of that rename, and the
+ * payload fields are unchanged.
  * @param sessionId - the session the event belongs to.
  * @param event - the event's `seq`, `time`, and payload.
  * @param state - the session's correlation state.
  * @param config - the resolved configuration.
  * @returns the record mapping, or `undefined` when the payload has no sub-call id.
  */
-export function mapCodeDispatchStart(
+export function mapPtcDispatchStart(
   sessionId: string,
   event: { seq: number; time: number; data: unknown },
   state: SessionState,
@@ -273,12 +304,13 @@ export function mapCodeDispatchStart(
     activityId,
     severityId: toolClass === 'delegation-external' ? SEVERITY.high : SEVERITY.informational,
     statusId: STATUS.unknown,
-    message: `code-mode sub-call ${name}`,
+    message: `ptc-mode sub-call ${name}`,
     correlationUid,
     ...details.process === undefined ? {} : { process: details.process },
     ...details.file === undefined ? {} : { file: details.file },
     ...details.httpRequest === undefined ? {} : { httpRequest: details.httpRequest },
     ...api === undefined ? {} : { api },
+    ...toolClass !== 'runtime-install' ? {} : { application: RUNTIME_INSTALL_APPLICATION },
     observables: details.observables,
     attributes: {
       ...details.attributes,
@@ -291,14 +323,16 @@ export function mapCodeDispatchStart(
 }
 
 /**
- * Map a `tool/code-dispatch`: one code-mode sub-call settling.
+ * Map a `tool/ptc-dispatch`: one PTC-mode sub-call settling.
+ *
+ * Renamed from `tool/code-dispatch` by the same migration as its start event.
  * @param sessionId - the session the event belongs to.
  * @param event - the event's `seq`, `time`, and payload.
  * @param state - the session's correlation state.
  * @param config - the resolved configuration.
  * @returns the record mapping, or `undefined` when the payload has no sub-call id.
  */
-export function mapCodeDispatch(
+export function mapPtcDispatch(
   sessionId: string,
   event: { seq: number; time: number; data: unknown },
   state: SessionState,
@@ -340,6 +374,7 @@ export function mapUnresolvedCall(sessionId: string, call: PendingCall, time: nu
     startTime: call.time,
     duration: Math.max(0, time - call.time),
     ...api === undefined ? {} : { api },
+    ...call.toolClass !== 'runtime-install' ? {} : { application: RUNTIME_INSTALL_APPLICATION },
     ...subjectOf(call.toolClass, call.name, call, correlationUid),
     attributes: {
       tool: call.name,

@@ -6,7 +6,7 @@ profile, and writes newline-delimited OCSF JSON to a local append-only spool —
 it to **Splunk HTTP Event Collector** or an **OTLP/HTTP** collector.
 
 📖 **[Full documentation](https://charlotten7.github.io/dsh-ocsf-forwarder/)** — including the
-complete event → OCSF mapping table for all 51 session event types.
+complete event → OCSF mapping table for all 59 session event types.
 
 ## What it does
 
@@ -18,11 +18,19 @@ complete event → OCSF mapping table for all 51 session event types.
   file tools → File System Activity (1001), web tools → HTTP Activity (4002), approvals and
   sandbox changes → Authorize Session (3003), everything else → API Activity (6003).
 - Names the MCP server behind every `mcp__<server>__<tool>` call.
+- Records **an execution runtime being installed on the host**: `load_workspace_dependencies`
+  unpacks Desktop's bundled Python, Node and pnpm under `$DSH_HOME` and appends no event of its
+  own, so the tool call is the only trace. It is mapped to Application Lifecycle / Install
+  carrying the interpreter paths and the bundled distribution inventory, not to a generic API
+  read.
 - Emits a **high-severity record when a tool hands the task to an external harness**, stating in
   the record that telemetry coverage ends at that boundary.
-- Records the **session log itself leaving the host**: with `session-log-deepseek` enabled the
-  harness attaches the log's own event envelopes to every model request, and each accepted upload
-  becomes a record naming the destination service and counting the events that went with it.
+- Records the **session log itself leaving the host**: the base bundle's `session-log-deepseek`
+  row attaches the log's own event envelopes to every model request, and each accepted upload
+  becomes a record naming the destination service and counting the events that went with it. That
+  row's `enabled` default is `false` through the `0.1.5` line and **`true` from `0.1.7`**, so on a
+  current harness this record is what a host looks like normally, and its *absence* is what an
+  operator who set `enabled: false` should be checking for.
 - Reads the **team** events by name — who joined, which agent messaged which other agent and
   whether the message wakes it, and the write scopes a shared task carries.
 - Emits a periodic **heartbeat** carrying counters, live session count and delivery cursor, so a
@@ -39,6 +47,13 @@ complete event → OCSF mapping table for all 51 session event types.
   flag, so a plugin-owned event type makes the next resume throw `SessionFormatUnsupportedError`
   and refuse the entire session. All durable output goes to our own sink, and the plugin registers
   no waterfall listener, so it cannot change a tool call, an approval decision or a model request.
+- **It cannot see the Desktop shell.** Desktop's update check, download, signature verification and
+  installer handoff all run in the Electron main process, where no plugin runs, and the only thing
+  that crosses the private IPC into the Host is a three-valued `inspect`/`lock`/`unlock` verb with
+  no version in it. A plugin therefore cannot tell a SOC that this host's agent binary changed
+  version. The same is true of the embedded browser: partitions, storage clearing and document
+  destruction are all main-process, and none of it reaches the session log.
+  [The evidence, and what *is* observable →](https://charlotten7.github.io/dsh-ocsf-forwarder/operations.html)
 - **It is not a containment boundary.** It runs in the agent's process at the agent's uid; an agent
   that can run `bash` can delete or rewrite the spool — and can recompute the hash chain over what
   it wrote, because the algorithm is published. What it buys you is that records leave the host
@@ -63,8 +78,9 @@ Pin `@deepseek-ai/dsh-headless` explicitly — the `@deepseek-ai/dsh-*` librarie
 still points at `0.0.1-rc.1`. Install from the registry or a packed tarball, **not** from a git
 spec: `lib/` is a build output git does not carry.
 
-Runs on dsh `0.1.0-rc.6` through the `0.1.2` line; CI runs the end-to-end suite against every line
-in that range.
+Runs on dsh `0.1.0-rc.6` through the `0.1.2` line and on the `0.1.5` and `0.1.7` lines; CI runs the
+end-to-end suite against every line the peer range admits. The `0.1.3` and `0.1.6` lines are
+deliberately **outside** the range: nothing here has been run against them.
 
 [Install in full →](https://charlotten7.github.io/dsh-ocsf-forwarder/install.html)
 

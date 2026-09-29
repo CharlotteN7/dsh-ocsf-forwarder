@@ -1,12 +1,17 @@
 /**
  * The session log leaving the host, driven end to end.
  *
- * `@deepseek-ai/dsh-session-log-deepseek` is a row of the base bundle, off
- * unless a deployment enables it. Enabled, it attaches the session's own
- * canonical event envelopes to every model request as `dsh_session_log` and
- * appends `session-log-deepseek/delivery-accepted` when the endpoint takes
- * them. The mock stands in for the endpoint, so the upload really happens over
- * a socket and the captured request body is the evidence that it did.
+ * `@deepseek-ai/dsh-session-log-deepseek` is a row of the base bundle. It
+ * attaches the session's own canonical event envelopes to every model request
+ * as `dsh_session_log` and appends `session-log-deepseek/delivery-accepted`
+ * when the endpoint takes them. The mock stands in for the endpoint, so the
+ * upload really happens over a socket and the captured request body is the
+ * evidence that it did.
+ *
+ * Its `enabled` default moved inside the supported peer range: `false` through
+ * the `0.1.5` line, `true` from `0.1.7`. Nothing here asserts which default the
+ * running harness has — the second test asserts the correspondence that is
+ * actually ours, that a record exists exactly when an upload did.
  *
  * The assertions join the two: the bytes the mock received, and the OCSF
  * records the forwarder wrote about them.
@@ -103,7 +108,7 @@ describe('session-log delivery', () => {
     }
   }, 120_000)
 
-  it('writes no delivery record when the row is left off, which is its default', async () => {
+  it('writes a delivery record exactly when the harness uploaded, with the row left at its default', async () => {
     const result = await runAgent({
       task: 'print a marker',
       sequence: ['success'],
@@ -111,9 +116,16 @@ describe('session-log delivery', () => {
     })
 
     expect(result.code, result.stderr).toBe(0)
-    expect(result.modelRequests.every(request => sessionLogOf(request.body) === undefined)).toBe(true)
-    expect(result.sessionLog.some(row => row['type'] === 'session-log-deepseek/delivery-accepted')).toBe(false)
-    expect(result.ocsfRecords.some(record => dshOf(record)['event_type'] === 'session-log-deepseek/delivery-accepted'))
-      .toBe(false)
+    const uploaded = result.modelRequests.some(request => sessionLogOf(request.body) !== undefined)
+    const logged = result.sessionLog.some(row => row['type'] === 'session-log-deepseek/delivery-accepted')
+    const recorded = result.ocsfRecords
+      .some(record => dshOf(record)['event_type'] === 'session-log-deepseek/delivery-accepted')
+
+    // A harness whose default is `false` uploads nothing and the forwarder
+    // writes nothing; one whose default is `true` does both. Either is a
+    // passing run — the failure this pins is a host uploading its session log
+    // with no record of it, which is the one outcome a SOC must never get.
+    expect(recorded).toBe(uploaded)
+    expect(logged).toBe(uploaded)
   }, 120_000)
 })

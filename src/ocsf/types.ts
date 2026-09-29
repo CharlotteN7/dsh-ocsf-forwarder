@@ -150,6 +150,12 @@ export interface OcsfAiAgent {
  */
 export interface OcsfMessageContext {
   readonly ai_role_id: number
+  /**
+   * `ai_role`, the enum's sibling. OCSF fills it with the role a record means
+   * when `ai_role_id` is `99 Other` — `system` and `developer` have no member
+   * of their own in 1.9.0.
+   */
+  readonly ai_role?: string
   readonly application?: OcsfApplication
   readonly uid?: string
   readonly prompt_text?: string

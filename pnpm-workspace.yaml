@@ -1,6 +1,27 @@
 allowBuilds:
   esbuild: true
 
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-agent@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-brand@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-invariants@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-llm-mock-server@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-llm@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-ptc-runtime@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-sandbox-policy@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-sandbox@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-scope@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-session-projection@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-session-telemetry@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-session@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-system-prompt@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-timeout@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-tools@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-typert-protocol@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-user-approval@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-util-crypto@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-util-values@0.1.7-rc.2'
+
 # The harness packages our devDependencies peer-depend on are not listed here,
 # so pnpm auto-installs them — and resolves each from its `latest` dist-tag,
 # which for every `@deepseek-ai/dsh-*` package still points at `0.1.0-rc.6`
@@ -9,13 +30,20 @@ allowBuilds:
 # reports ten unmet peers. Pinned here rather than added as devDependencies
 # because nothing in this package imports any of them.
 overrides:
-  '@deepseek-ai/dsh-agent': 0.1.2-rc.1
-  '@deepseek-ai/dsh-attachment': 0.1.2-rc.1
-  '@deepseek-ai/dsh-brand': 0.1.2-rc.1
-  '@deepseek-ai/dsh-code-runtime': 0.1.2-rc.1
-  '@deepseek-ai/dsh-invariants': 0.1.2-rc.1
-  '@deepseek-ai/dsh-scope': 0.1.2-rc.1
-  '@deepseek-ai/dsh-system-prompt': 0.1.2-rc.1
-  '@deepseek-ai/dsh-timeout': 0.1.2-rc.1
-  '@deepseek-ai/dsh-typert-protocol': 0.1.2-rc.1
-  '@deepseek-ai/dsh-user-approval': 0.1.2-rc.1
+  # Held at the runtime dependency's exact version so the development graph has
+  # one copy rather than two. The `0.1.7` line's packages ask for `~3.18.4`,
+  # whose `Schema` type differs enough that two copies in one program make
+  # `z.object(...)` unassignable to `z<Config>` — and 3.18.4 cannot be adopted,
+  # because it imports `createVolatile` from `@deepseek-ai/cosmokit`, which the
+  # cosmokit the `0.1.2` line ships does not export: the plugin fails to load.
+  '@deepseek-ai/schemastery': 3.18.1
+  '@deepseek-ai/dsh-agent': 0.1.7-rc.2
+  '@deepseek-ai/dsh-attachment': 0.1.7-rc.2
+  '@deepseek-ai/dsh-brand': 0.1.7-rc.2
+  '@deepseek-ai/dsh-code-runtime': 0.1.7-rc.2
+  '@deepseek-ai/dsh-invariants': 0.1.7-rc.2
+  '@deepseek-ai/dsh-scope': 0.1.7-rc.2
+  '@deepseek-ai/dsh-system-prompt': 0.1.7-rc.2
+  '@deepseek-ai/dsh-timeout': 0.1.7-rc.2
+  '@deepseek-ai/dsh-typert-protocol': 0.1.7-rc.2
+  '@deepseek-ai/dsh-user-approval': 0.1.7-rc.2

@@ -4,7 +4,7 @@ import { SessionState } from '../../src/correlate.ts'
 import { mapEvent } from '../../src/map/index.ts'
 import { mapUnresolvedCall } from '../../src/map/tool-events.ts'
 import { classifyTool, parseArguments } from '../../src/map/tools.ts'
-import { CLASS, OBSERVABLE, SEVERITY, STATUS, typeUid } from '../../src/ocsf/constants.ts'
+import { ACTIVITY, CLASS, OBSERVABLE, SEVERITY, STATUS, typeUid } from '../../src/ocsf/constants.ts'
 import { buildRecord } from '../../src/ocsf/record.ts'
 import type { OcsfObservable } from '../../src/ocsf/types.ts'
 import { digest } from '../../src/privacy.ts'
@@ -318,6 +318,97 @@ describe('tool/result correlation', () => {
     mapEvent('session-a', call('bash', { command: 'true' }), first, config)
     const mapping = mapEvent('session-b', result('call-1', false), second, config)
     expect(mapping?.attributes?.['unpaired']).toBe(true)
+  })
+})
+
+describe('a tool result whose message changed shape', () => {
+  // `isError` and `toolCallId` sat on the single result block through the
+  // `0.1.5` line and moved onto the tool-role message itself in `0.1.7`. The
+  // peer range admits both, and reading only the older placement graded every
+  // failed tool call on a newer harness a success.
+  const settle = (message: unknown): ReturnType<typeof mapEvent> => {
+    const state = new SessionState()
+    mapEvent(SESSION, {
+      type: 'tool/call',
+      seq: 1,
+      time: 1_000,
+      data: { turn: 1, step: 0, callId: 'mock-call-1', name: 'bash', arguments: '{"command":"id"}' },
+    }, state, testConfig())
+    return mapEvent(SESSION, { type: 'tool/result', seq: 2, time: 1_100, data: { message } }, state, testConfig())
+  }
+
+  it('reads the failure off the tool-role message the 0.1.7 line writes', () => {
+    const mapping = settle({
+      role: 'tool',
+      source: { kind: 'tool', callId: 'mock-call-1' },
+      toolCallId: 'mock-call-1',
+      content: [{ type: 'text', text: 'Error: approval unavailable' }],
+      isError: true,
+    })
+    expect(mapping?.statusId).toBe(STATUS.failure)
+    expect(mapping?.severityId).toBe(SEVERITY.medium)
+    expect(mapping?.attributes?.['is_error']).toBe(true)
+  })
+
+  // This one and the next pin the older placement, which the fix had to keep
+  // working; both pass against the code before it, which is the point of them.
+  it('still reads the failure off the result block the older lines write', () => {
+    const mapping = settle({
+      role: 'user',
+      source: { kind: 'tool', callId: 'mock-call-1' },
+      content: [{ type: 'tool_result', toolCallId: 'mock-call-1', isError: true }],
+    })
+    expect(mapping?.statusId).toBe(STATUS.failure)
+    expect(mapping?.attributes?.['is_error']).toBe(true)
+  })
+
+  it('reports a success as a success under either shape', () => {
+    expect(settle({ role: 'tool', source: { kind: 'tool', callId: 'mock-call-1' }, isError: false })?.statusId)
+      .toBe(STATUS.success)
+    expect(settle({ source: { kind: 'tool', callId: 'mock-call-1' }, content: [{ toolCallId: 'mock-call-1', isError: false }] })?.statusId)
+      .toBe(STATUS.success)
+  })
+
+  it('finds the call id on the message when neither the source nor a block carries one', () => {
+    const mapping = settle({ role: 'tool', toolCallId: 'mock-call-1', isError: true })
+    expect(mapping?.attributes?.['call_id']).toBe('mock-call-1')
+    expect(mapping?.attributes?.['unpaired']).toBeUndefined()
+    expect(mapping?.statusId).toBe(STATUS.failure)
+  })
+})
+
+describe('the renamed PTC sub-dispatch types', () => {
+  // The `0.1.5` line renamed `tool/code-dispatch{,-start}` to
+  // `tool/ptc-dispatch{,-start}`. Routed nowhere, they fell to the generic
+  // fallback — API Activity 6003 / `99 Other`, no tool name, no class, no
+  // correlation to the parent call — on every harness from that line on.
+  const dispatch = (type: string, seq: number, time: number, data: unknown, state: SessionState): ReturnType<typeof mapEvent> =>
+    mapEvent(SESSION, { type, seq, time, data }, state, testConfig())
+
+  it('classifies a PTC sub-call by its own tool rather than falling back', () => {
+    const state = new SessionState()
+    const start = dispatch('tool/ptc-dispatch-start', 5, 2_000, {
+      rootCallId: 'root', parentCallId: 'parent', subCallId: 'sub-1', name: 'write', arguments: { file_path: '/tmp/x' },
+    }, state)
+    expect(start?.classUid).toBe(CLASS.fileSystemActivity)
+    expect(start?.activityId).toBe(ACTIVITY.fileSystem.create)
+    expect(start?.file?.path).toBe('/tmp/x')
+    expect(start?.correlationUid).toBe(`${SESSION}:sub-1`)
+    expect(start?.attributes?.['parent_call_id']).toBe('parent')
+    expect(start?.attributes?.['root_call_id']).toBe('root')
+
+    const settle = dispatch('tool/ptc-dispatch', 6, 2_050, { subCallId: 'sub-1', name: 'write', isError: true }, state)
+    expect(settle?.classUid).toBe(CLASS.fileSystemActivity)
+    expect(settle?.statusId).toBe(STATUS.failure)
+    expect(settle?.duration).toBe(50)
+    expect(settle?.attributes?.['tool']).toBe('write')
+  })
+
+  it('maps the retired and the current name identically, apart from the type the record names', () => {
+    const payload = { rootCallId: 'root', parentCallId: 'parent', subCallId: 'sub-1', name: 'bash', arguments: { command: 'id' } }
+    const retired = dispatch('tool/code-dispatch-start', 5, 2_000, payload, new SessionState())
+    const current = dispatch('tool/ptc-dispatch-start', 5, 2_000, payload, new SessionState())
+    expect(current).toEqual(retired)
   })
 })
 

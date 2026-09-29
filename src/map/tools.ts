@@ -11,7 +11,8 @@
 
 import type { ResolvedConfig } from '../config.ts'
 import { ACTIVITY, CLASS, OBSERVABLE, type ClassUid } from '../ocsf/constants.ts'
-import type { JsonValue, OcsfApi, OcsfFile, OcsfHttpRequest, OcsfObservable, OcsfProcess } from '../ocsf/types.ts'
+import type { JsonValue, OcsfApi, OcsfApplication, OcsfFile, OcsfHttpRequest, OcsfObservable, OcsfProcess } from '../ocsf/types.ts'
+import { readNested, readRecord, readString } from '../read.ts'
 import { commandName, redactArguments, redactCommandLine, redactUrl } from '../privacy.ts'
 
 /** The activity a tool performs, in OCSF terms. */
@@ -23,6 +24,8 @@ export type ToolClass =
   | 'file-update'
   | 'http'
   | 'api'
+  /** Installs an execution runtime on the host; see {@link runtimeInstallDetails}. */
+  | 'runtime-install'
   /** Hands the task to a harness this plugin cannot observe; see {@link DELEGATION_COVERAGE}. */
   | 'delegation-external'
 
@@ -52,6 +55,10 @@ export const TOOL_CLASSES: Readonly<Record<string, ToolClass>> = Object.freeze({
   str_replace_editor: 'file-update',
   web_fetch: 'http',
   web_search: 'http',
+  // Desktop's bundled Python/Node/pnpm payload. Calling it copies interpreters
+  // onto the host under `$DSH_HOME` and hands their absolute paths back to the
+  // model, which is an application installation rather than an API read.
+  load_workspace_dependencies: 'runtime-install',
 })
 
 /** The OCSF class and activity one {@link ToolClass} maps to. */
@@ -63,6 +70,10 @@ const CLASS_OF_TOOL_CLASS: Readonly<Record<ToolClass, { classUid: ClassUid; acti
   'file-update': { classUid: CLASS.fileSystemActivity, activityId: ACTIVITY.fileSystem.update },
   http: { classUid: CLASS.httpActivity, activityId: ACTIVITY.http.get },
   api: { classUid: CLASS.apiActivity, activityId: ACTIVITY.api.read },
+  // OCSF Application Lifecycle names the activity exactly: "Install the
+  // application". The application installed is the bundled runtime, not the
+  // harness, so the record carries its own `application` object.
+  'runtime-install': { classUid: CLASS.applicationLifecycle, activityId: ACTIVITY.applicationLifecycle.install },
   // The external harness is a real child process launched in the parent
   // session's workspace, so Process Activity is the honest class as well as the
   // one a SOC already writes detections against.
@@ -292,4 +303,80 @@ export function toolDetails(
   }
 
   return { observables, attributes }
+}
+
+/**
+ * `application` every runtime-install record carries. The application being
+ * installed is the bundled interpreter payload, not the harness that record.ts
+ * names by default.
+ */
+export const RUNTIME_INSTALL_APPLICATION: OcsfApplication = Object.freeze({ name: 'dsh-primary-runtime' })
+
+/** Result fields naming an executable or script the install put on the host. */
+const RUNTIME_PATH_FIELDS: readonly { readonly field: string; readonly attribute: string }[] = Object.freeze([
+  { field: 'python', attribute: 'runtime_python_path' },
+  { field: 'node', attribute: 'runtime_node_path' },
+  { field: 'pnpm', attribute: 'runtime_pnpm_path' },
+])
+
+/** Result fields naming a library directory the install created. */
+const RUNTIME_DIRECTORY_FIELDS: readonly { readonly field: string; readonly attribute: string }[] = Object.freeze([
+  { field: 'pythonPackages', attribute: 'runtime_python_packages_path' },
+  { field: 'nodePackages', attribute: 'runtime_node_packages_path' },
+])
+
+/** The `application`, observables, and attributes a runtime install reports. */
+export interface RuntimeInstallDetails {
+  readonly application?: OcsfApplication
+  readonly observables: readonly OcsfObservable[]
+  readonly attributes: Readonly<Record<string, JsonValue>>
+}
+
+/**
+ * Read one runtime-install tool result.
+ *
+ * The tool declares an output schema and renders its value as a single JSON
+ * text block, so the installed paths and the bundled distribution inventory are
+ * in the session log verbatim. That text is model-facing output arriving from a
+ * durable log, so it is parsed defensively: anything that is not a JSON object
+ * yields no attributes rather than a guess.
+ *
+ * Paths are emitted verbatim on the `file.path` rule — an interpreter's
+ * location is the security signal, not a secret — and the distribution map is
+ * the software inventory a SOC joins against advisories. No other field of the
+ * result is read.
+ * @param data - the `tool/result` payload.
+ * @param isError - whether the result reported failure, in which case its text
+ *   is a diagnostic rather than the report and is not read.
+ * @returns the install report, empty when the result carries none.
+ */
+export function runtimeInstallDetails(data: unknown, isError: boolean): RuntimeInstallDetails {
+  const application = RUNTIME_INSTALL_APPLICATION
+  if (isError) return { application, observables: [], attributes: {} }
+  const content = readRecord(readNested(data, 'message'))?.['content']
+  const text = readString(Array.isArray(content) ? content[0] : undefined, 'text')
+  if (text === undefined) return { application, observables: [], attributes: {} }
+  const parsed = parseArguments(text)
+  if (parsed.record === undefined) return { application, observables: [], attributes: {} }
+  const observables: OcsfObservable[] = []
+  const attributes: Record<string, JsonValue> = {}
+  for (const { field, attribute } of RUNTIME_PATH_FIELDS) {
+    const path = stringArg(parsed.record, field)
+    if (path === undefined) continue
+    attributes[attribute] = path
+    observables.push({ name: 'file.path', type_id: OBSERVABLE.filePath, value: path })
+  }
+  for (const { field, attribute } of RUNTIME_DIRECTORY_FIELDS) {
+    const path = stringArg(parsed.record, field)
+    if (path !== undefined) attributes[attribute] = path
+  }
+  const distributions = readRecord(parsed.record['pythonDistributions'])
+  if (distributions !== undefined) {
+    const versions = Object.fromEntries(
+      Object.entries(distributions).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    )
+    attributes['runtime_python_distributions'] = versions
+    attributes['runtime_python_distribution_count'] = Object.keys(versions).length
+  }
+  return { application, observables, attributes }
 }

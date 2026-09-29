@@ -71,6 +71,8 @@ const IDENTITY: Readonly<Record<string, unknown>> = Object.freeze({
   'team/message/queued': { message: { id: 'msg-1' } },
   'team/message/delivered': { messageId: 'msg-1' },
   'team/task': { task: { id: 'task-1' } },
+  'subagent/catalog': { childId: 'child' },
+  'deliverables/presented': { files: [{ path: '/srv/app/report.pdf' }] },
 })
 
 describe('the published event table', () => {
@@ -102,11 +104,27 @@ describe('the published event table', () => {
     expect(wrong).toEqual([])
   })
 
-  it('names no class for an event that produces no record, and that is every dropped type', () => {
+  it('names no class for an event that produces no record, and that is every dropped type the vocabulary has', () => {
     const classless = table.filter(row => row.classUid === undefined).map(row => row.eventType)
     // The tool events name their class by tool name rather than in the column.
-    const byToolName = ['tool/call', 'tool/result', 'tool/code-dispatch-start', 'tool/code-dispatch']
+    const byToolName = ['tool/call', 'tool/result', 'tool/ptc-dispatch-start', 'tool/ptc-dispatch']
+    // The drop list spans the whole peer range and the table is the newest
+    // vocabulary in it, so the two sets are equal only on the intersection:
+    // `assistant/chunk` is dropped for the builds that still emit it and has
+    // no row, because the newest harness no longer knows the type. Requiring
+    // equality here would force the table to describe a retired event or the
+    // drop list to stop covering a supported harness.
+    const dropped = [...DEFAULT_DROPPED_EVENT_TYPES]
     expect(classless.filter(type => !byToolName.includes(type)).sort())
-      .toEqual([...DEFAULT_DROPPED_EVENT_TYPES].sort())
+      .toEqual(dropped.filter(type => KNOWN_SESSION_EVENT_TYPES.has(type)).sort())
+  })
+
+  it('drops nothing the harness vocabulary has never heard of, beyond the types it retired', () => {
+    // A typo in the drop list silently forwards the type it meant to drop, and
+    // nothing else fails. Retired names stay on purpose and are listed here.
+    const retired = ['assistant/chunk']
+    expect([...DEFAULT_DROPPED_EVENT_TYPES]
+      .filter(type => !KNOWN_SESSION_EVENT_TYPES.has(type) && !retired.includes(type)))
+      .toEqual([])
   })
 })

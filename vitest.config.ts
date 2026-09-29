@@ -13,7 +13,7 @@
  * and the entries below ratchet each existing file above it. Raising one means
  * writing the test; the entry is what records that the test exists.
  *
- * Eighteen of the twenty-six source files are at 100 on all four metrics. The
+ * Twenty of the twenty-eight source files are at 100 on all four metrics. The
  * eight that are not are held exactly where they are rather than exempted, and
  * no `v8 ignore` is used anywhere: the residual gap is the absent half of a few
  * `field === undefined ? {} : { field }` spreads and of two `error instanceof
@@ -43,14 +43,16 @@ export default defineConfig({
         'src/integrity/attest.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/integrity/verify.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/authorization.ts': { lines: 100, functions: 100, branches: 97.61, statements: 100 },
+        'src/map/deliverables.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
+        'src/map/surface.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/heartbeat.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/egress.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/index.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/map/interaction.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
-        'src/map/lifecycle.ts': { lines: 100, functions: 100, branches: 99.03, statements: 100 },
+        'src/map/lifecycle.ts': { lines: 100, functions: 100, branches: 99.12, statements: 100 },
         'src/map/team.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
-        'src/map/tool-events.ts': { lines: 100, functions: 100, branches: 98.38, statements: 100 },
-        'src/map/tools.ts': { lines: 100, functions: 100, branches: 95.65, statements: 100 },
+        'src/map/tool-events.ts': { lines: 100, functions: 100, branches: 98.52, statements: 100 },
+        'src/map/tools.ts': { lines: 100, functions: 100, branches: 96.38, statements: 100 },
         'src/ocsf/constants.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/ocsf/record.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },
         'src/ocsf/types.ts': { lines: 100, functions: 100, branches: 100, statements: 100 },

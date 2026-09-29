@@ -466,6 +466,59 @@ export function mapSubagentDescriptor(sessionId: string, event: { data: unknown 
   }
 }
 
+/**
+ * Map `subagent/catalog`: the parent's own record of one direct child it
+ * created.
+ *
+ * It is the third event type that names a child session by id — `team/member`
+ * and `tool-workflow/agent-start` are the others — so it builds the same
+ * `delegation` link. `mode` decides whether the parent can keep talking to the
+ * child (`continuable`) or spent it on one dispatch (`one-shot`), and the
+ * catalog's own `version` is recorded because v1 admits a child whose mode the
+ * parent could not read.
+ * @param sessionId - the session the event belongs to, which is the parent.
+ * @param event - the event's payload.
+ * @param config - the resolved configuration, for the label digest.
+ * @returns the record mapping, or `undefined` when the payload names no child:
+ *   the child's identity is the whole of what this record says.
+ */
+export function mapSubagentCatalog(
+  sessionId: string,
+  event: { data: unknown },
+  config: ResolvedConfig,
+): EventMapping | undefined {
+  const childId = readString(event.data, 'childId')
+  if (childId === undefined) return undefined
+  const createdAt = readNumber(event.data, 'childCreatedAt')
+  const rawLabel = readString(event.data, 'label')
+  const label = rawLabel === undefined ? undefined : summariseText(rawLabel, config)
+  return {
+    classUid: CLASS.applicationLifecycle,
+    activityId: ACTIVITY.applicationLifecycle.start,
+    // A child agent runs its own tools under the parent's authority, which is
+    // the grading `subagent/descriptor` already carries from the child's side.
+    severityId: SEVERITY.low,
+    statusId: STATUS.success,
+    message: `subagent catalogued (${readString(event.data, 'mode') ?? 'unknown'})`,
+    correlationUid: `${sessionId}:subagent:${childId}`,
+    delegation: {
+      uid: childId,
+      parent_uid: sessionId,
+      ...createdAt === undefined ? {} : { created_time: createdAt },
+    },
+    attributes: {
+      child_session_id: childId,
+      subagent_mode: readString(event.data, 'mode') ?? 'unknown',
+      catalog_version: readNumber(event.data, 'version') ?? 0,
+      phase: 'catalogued',
+      ...createdAt === undefined ? {} : { child_created_at: createdAt },
+      // The label is the delegating call's own `description` — model-written
+      // free text — so it is digested on the same rule as a member's brief.
+      ...label === undefined ? {} : { label_digest: label.digest, label_length: label.length },
+    },
+  }
+}
+
 /** Workflow event types and the lifecycle activity each one records. */
 const WORKFLOW_ACTIVITIES: Readonly<Record<string, number>> = Object.freeze({
   'tool-workflow/run-start': ACTIVITY.applicationLifecycle.start,

@@ -26,6 +26,13 @@ import { testConfig, testEnvironment } from './support.ts'
 import type { Config } from '../../src/config.ts'
 
 /**
+ * The one sentinel that is also used as an object *key*, so it is named
+ * separately: indexing the frozen table below yields `string | undefined`,
+ * which is not a property name.
+ */
+const RUNTIME_DISTRIBUTION = 'SENTINEL-notasecret-runtime-distribution'
+
+/**
  * One secret per surface, so a failure names the surface that leaked. Each is
  * a value a real deployment would call a secret and none is a substring of
  * another.
@@ -64,6 +71,13 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
   teamMemberError: 'SENTINEL-teamerr-route-rejected-key-sk-77',
   teamMemberName: 'SENTINEL-notasecret-team-member-name',
   teamWriteScope: 'SENTINEL-notasecret-team-write-scope',
+  surfaceSystem: 'SENTINEL-surfacesys-the-ops-runbook-password',
+  surfaceDeveloper: 'SENTINEL-surfacedev-added-tool-with-token-sk-1',
+  catalogLabel: 'SENTINEL-catalog-exfiltrate-the-vault-please',
+  presentedDescription: 'SENTINEL-presentdesc-contains-the-api-key',
+  presentedPath: 'SENTINEL-notasecret-presented-path',
+  runtimePath: 'SENTINEL-notasecret-runtime-interpreter-path',
+  runtimeDistribution: RUNTIME_DISTRIBUTION,
 })
 
 /**
@@ -72,7 +86,8 @@ const SENTINELS: Readonly<Record<string, string>> = Object.freeze({
  * rather than a bare set, so widening the lane means changing this list.
  */
 const DELIBERATE: readonly string[] = [
-  'argumentKey', 'hookMatcher', 'scheduleId', 'teamMemberName', 'teamWriteScope', 'toolErrorName',
+  'argumentKey', 'hookMatcher', 'presentedPath', 'runtimeDistribution', 'runtimePath', 'scheduleId',
+  'teamMemberName', 'teamWriteScope', 'toolErrorName',
 ]
 
 /**
@@ -356,6 +371,62 @@ function events(): MappableEvent[] {
       data: { allowedModels: [{ provider: 'deepseek-official', model: 'deepseek-chat' }] },
     },
     { type: 'session-log-deepseek/delivery-accepted', seq: 47, time: 1_047, data: { sessionId: 'S1', throughSeq: 46 } },
+    // The model surface: the instructions the model runs under, the capability
+    // deltas admitted mid-session, and the child a parent catalogued. All three
+    // carry composed text; none of it belongs in this lane.
+    {
+      type: 'system/message',
+      seq: 48,
+      time: 1_048,
+      data: { turn: 1, step: 0, message: { id: 'sys-0', content: [{ type: 'text', text: SENTINELS['surfaceSystem'] }] } },
+    },
+    {
+      type: 'developer/message',
+      seq: 49,
+      time: 1_049,
+      data: { turn: 1, step: 0, headerSeq: 2, message: { id: 'dev-0', content: [{ type: 'text', text: SENTINELS['surfaceDeveloper'] }] } },
+    },
+    { type: 'assistant/attempt', seq: 50, time: 1_050, data: { turn: 1, step: 0, stream: [{ text: SENTINELS['completion'] }] } },
+    { type: 'image/offload', seq: 51, time: 1_051, data: { targets: [{ seq: 4, imageIndexes: [0] }] } },
+    {
+      type: 'subagent/catalog',
+      seq: 52,
+      time: 1_052,
+      data: { version: 1, childId: 'session-child', childCreatedAt: 900, mode: 'continuable', label: SENTINELS['catalogLabel'] },
+    },
+    // A path the agent handed the user is the signal; the model's own note
+    // about it is not.
+    {
+      type: 'deliverables/presented',
+      seq: 53,
+      time: 1_053,
+      data: {
+        turn: 1,
+        callId: 'c9',
+        files: [{ path: SENTINELS['presentedPath'], description: SENTINELS['presentedDescription'] }],
+      },
+    },
+    // A runtime install reports interpreter paths and a distribution
+    // inventory, both verbatim on `file.path`'s reasoning.
+    { type: 'tool/call', seq: 54, time: 1_054, data: { turn: 1, step: 0, callId: 'c10', name: 'load_workspace_dependencies', arguments: '{}' } },
+    {
+      type: 'tool/result',
+      seq: 55,
+      time: 1_055,
+      data: {
+        message: {
+          source: { callId: 'c10' },
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              python: SENTINELS['runtimePath'],
+              pythonPackages: `${SENTINELS['runtimePath']}/site-packages`,
+              pythonDistributions: { [RUNTIME_DISTRIBUTION]: '1.0.0' },
+            }),
+          }],
+        },
+      },
+    },
   ]
 }
 
